@@ -250,6 +250,7 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
         seed: int = 42,
         rng: np.random.Generator | None = None,
         shuffle: bool = True,
+        load_annotations: bool = True,
     ):
         """Initialize a StreamingLeRobotDataset.
 
@@ -268,6 +269,8 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
             seed (int, optional): Reproducibility random seed.
             rng (np.random.Generator | None, optional): Random number generator.
             shuffle (bool, optional): Whether to shuffle the dataset across exhaustions. Defaults to True.
+            load_annotations (bool, optional): Whether to expose per-frame annotations (if available in dataset
+                metadata) as the "annotation" field. Defaults to True.
         """
         super().__init__()
         self.repo_id = repo_id
@@ -278,6 +281,7 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
         self.episodes = episodes
         self.tolerance_s = tolerance_s
         self.revision = revision if revision else CODEBASE_VERSION
+        self.load_annotations = load_annotations
         self.seed = seed
         self.rng = rng if rng is not None else np.random.default_rng(seed)
         self.shuffle = shuffle
@@ -294,6 +298,12 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
         self.meta = LeRobotDatasetMetadata(
             self.repo_id, self.root, self.revision, force_cache_sync=force_cache_sync
         )
+
+        if self.load_annotations and "annotations" not in self.meta.episodes.features:
+            raise ValueError(
+                "dataset.load_annotations is enabled but this dataset has no episode annotations metadata. "
+                "Disable it with --dataset.load_annotations=false."
+            )
         # Check version
         check_version_compatibility(self.repo_id, self.meta._version, CODEBASE_VERSION)
 
@@ -510,6 +520,12 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
             result.update(update)
 
         result["task"] = self.meta.tasks.iloc[item["task_index"]].name
+
+        if self.load_annotations and "annotations" in self.meta.episodes.features:
+            ep_annotations = self.meta.episodes[ep_idx]["annotations"]
+            frame_idx = int(item["frame_index"])
+            if isinstance(ep_annotations, list) and 0 <= frame_idx < len(ep_annotations):
+                result["annotation"] = ep_annotations[frame_idx]
 
         yield result
 

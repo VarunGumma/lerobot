@@ -259,8 +259,8 @@ class PiGemmaModel(GemmaModel):  # type: ignore[misc]
             position_ids = cache_position.unsqueeze(0)
 
         causal_mask = create_causal_mask(
-            config=self.config,
-            inputs_embeds=inputs_embeds,
+            self.config,
+            inputs_embeds,
             attention_mask=attention_mask,
             cache_position=cache_position,
             past_key_values=past_key_values,

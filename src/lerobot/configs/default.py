@@ -33,6 +33,7 @@ class DatasetConfig:
     image_transforms: ImageTransformsConfig = field(default_factory=ImageTransformsConfig)
     revision: str | None = None
     use_imagenet_stats: bool = True
+    load_annotations: bool = True
     video_backend: str = field(default_factory=get_safe_default_codec)
     streaming: bool = False
 

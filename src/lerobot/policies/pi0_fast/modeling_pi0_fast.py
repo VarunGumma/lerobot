@@ -258,7 +258,17 @@ class PI0FastPaliGemma(nn.Module):
         if image.dtype != torch.float32:
             image = image.to(torch.float32)
         image_outputs = self.paligemma.model.get_image_features(image)
-        features = image_outputs.pooler_output * self.paligemma.config.text_config.hidden_size**0.5
+
+        # --- REPLACEMENT ---
+        if hasattr(image_outputs, "pooler_output") and image_outputs.pooler_output is not None:
+            features = image_outputs.pooler_output
+        elif isinstance(image_outputs, torch.Tensor):
+            features = image_outputs
+        else:
+            # Fallback for other ModelOutput types that might store it in the first element
+            features = image_outputs[0] 
+
+        features = features * (self.paligemma.config.text_config.hidden_size**0.5)
         if features.dtype != out_dtype:
             features = features.to(out_dtype)
         return features

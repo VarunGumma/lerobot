@@ -163,6 +163,11 @@ class AddBatchDimensionComplementaryDataStep(ComplementaryDataProcessorStep):
             if isinstance(task_value, str):
                 complementary_data["task"] = [task_value]
 
+        if "annotation" in complementary_data:
+            annotation_value = complementary_data["annotation"]
+            if isinstance(annotation_value, str):
+                complementary_data["annotation"] = [annotation_value]
+
         # Process index field - add batch dim if 0D
         if "index" in complementary_data:
             index_value = complementary_data["index"]

@@ -370,6 +370,7 @@ class LeRobotDatasetMetadata:
         episode_index: int,
         episode_length: int,
         episode_tasks: list[str],
+        episode_annotations: list[str] | None,
         episode_stats: dict[str, dict],
         episode_metadata: dict,
     ) -> None:
@@ -378,6 +379,8 @@ class LeRobotDatasetMetadata:
             "tasks": episode_tasks,
             "length": episode_length,
         }
+        if episode_annotations is not None:
+            episode_dict["annotations"] = episode_annotations
         episode_dict.update(episode_metadata)
         episode_dict.update(flatten_dict({"stats": episode_stats}))
         self._save_episode_metadata(episode_dict)

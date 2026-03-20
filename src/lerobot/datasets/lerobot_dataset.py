@@ -107,6 +107,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         streaming_encoding: bool = False,
         encoder_queue_maxsize: int = 30,
         encoder_threads: int | None = None,
+        load_annotations: bool = True,
     ):
         """
         2 modes are available for instantiating this class, depending on 2 different use cases:
@@ -229,6 +230,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
             encoder_threads (int | None, optional): Number of threads per encoder instance. None lets the
                 codec auto-detect (default). Lower values reduce CPU usage per encoder. Maps to 'lp' (via svtav1-params) for
                 libsvtav1 and 'threads' for h264/hevc.
+            load_annotations (bool, optional): Whether to expose per-frame annotations (if available in dataset
+                metadata) as the "annotation" field. Defaults to True.
         """
         super().__init__()
         self.repo_id = repo_id
@@ -244,6 +247,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self.episodes_since_last_encoding = 0
         self.vcodec = resolve_vcodec(vcodec)
         self._encoder_threads = encoder_threads
+        self.load_annotations = load_annotations
 
         # Unused attributes
         self.image_writer = None
@@ -259,6 +263,12 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self.meta = LeRobotDatasetMetadata(
             self.repo_id, self.root, self.revision, force_cache_sync=force_cache_sync
         )
+
+        if self.load_annotations and "annotations" not in self.meta.episodes.features:
+            raise ValueError(
+                "dataset.load_annotations is enabled but this dataset has no episode annotations metadata. "
+                "Disable it with --dataset.load_annotations=false."
+            )
 
         # Track dataset state for efficient incremental writing
         self._lazy_loading = False
@@ -636,6 +646,13 @@ class LeRobotDataset(torch.utils.data.Dataset):
         task_idx = item["task_index"].item()
         item["task"] = self.meta.tasks.iloc[task_idx].name
 
+        # Add per-frame annotation when episode annotations metadata is available.
+        if self.load_annotations and "annotations" in self.meta.episodes.features:
+            ep_annotations = self.meta.episodes[ep_idx]["annotations"]
+            frame_idx = int(item["frame_index"].item())
+            if isinstance(ep_annotations, list) and 0 <= frame_idx < len(ep_annotations):
+                item["annotation"] = ep_annotations[frame_idx]
+
         # add subtask information if available
         if "subtask_index" in self.features and self.meta.subtasks is not None:
             subtask_idx = item["subtask_index"].item()
@@ -775,7 +792,14 @@ class LeRobotDataset(torch.utils.data.Dataset):
         episode_length = episode_buffer.pop("size")
         tasks = episode_buffer.pop("task")
         episode_tasks = list(set(tasks))
+        episode_annotations = episode_buffer.pop("annotations", None)
         episode_index = episode_buffer["episode_index"]
+
+        if episode_annotations is not None and len(episode_annotations) != episode_length:
+            raise ValueError(
+                "Episode annotations length must match episode length "
+                f"({len(episode_annotations)} != {episode_length})."
+            )
 
         episode_buffer["index"] = np.arange(self.meta.total_frames, self.meta.total_frames + episode_length)
         episode_buffer["episode_index"] = np.full((episode_length,), episode_index)
@@ -865,7 +889,14 @@ class LeRobotDataset(torch.utils.data.Dataset):
                     ep_metadata.update(self._save_episode_video(video_key, episode_index))
 
         # `meta.save_episode` need to be executed after encoding the videos
-        self.meta.save_episode(episode_index, episode_length, episode_tasks, ep_stats, ep_metadata)
+        self.meta.save_episode(
+            episode_index,
+            episode_length,
+            episode_tasks,
+            episode_annotations,
+            ep_stats,
+            ep_metadata,
+        )
 
         if has_video_keys and use_batched_encoding:
             # Check if we should trigger batch encoding

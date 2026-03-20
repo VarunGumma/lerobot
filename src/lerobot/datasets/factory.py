@@ -96,6 +96,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
                 image_transforms=image_transforms,
                 revision=cfg.dataset.revision,
                 video_backend=cfg.dataset.video_backend,
+                load_annotations=cfg.dataset.load_annotations,
                 tolerance_s=cfg.tolerance_s,
             )
         else:
@@ -107,6 +108,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
                 image_transforms=image_transforms,
                 revision=cfg.dataset.revision,
                 max_num_shards=cfg.num_workers,
+                load_annotations=cfg.dataset.load_annotations,
                 tolerance_s=cfg.tolerance_s,
             )
     else:

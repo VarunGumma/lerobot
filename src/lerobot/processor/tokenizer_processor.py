@@ -140,6 +140,83 @@ class TokenizerProcessorStep(ObservationProcessorStep):
             return task
 
         return None
+    
+    def add_atomic_step(self, task_state_str: str, atomic_step: str) -> str:
+        """
+        Convert:
+            'Task: <task>, State: <state>;'
+        into:
+            'Task: <task>, Control Plan: <atomic_step>, State: <state>;'
+        """
+
+        prefix = "Task:"
+        state_marker = ", State:"
+
+        if not task_state_str.startswith(prefix):
+            raise ValueError("Input must start with 'Task:'")
+
+        if state_marker not in task_state_str:
+            raise ValueError("Input must contain ', State:'")
+
+        task_part, state_part = task_state_str.split(state_marker, 1)
+
+        # Remove 'Task:' prefix and trim whitespace
+        task_text = task_part[len(prefix):].strip()
+
+        # Avoid duplicate punctuation before appending subtask
+        task_text = task_text.rstrip(" .")
+
+        atomic_step = atomic_step.strip().rstrip(" .")
+
+        return f"Task: {task_text}, Control Plan: {atomic_step}, State:{state_part}"
+
+    def get_task_with_annotation(self, transition: EnvTransition) -> list[str] | None:
+        """
+        Extracts the task description(s) from the transition's complementary data.
+
+        Args:
+            transition: The environment transition.
+
+        Returns:
+            A list of task strings, or None if the task key is not found or the value is None.
+        """
+        complementary_data = transition.get(TransitionKey.COMPLEMENTARY_DATA)
+        if complementary_data is None:
+            raise ValueError("Complementary data is None so no task can be extracted from it")
+
+        task = complementary_data[self.task_key]
+        if task is None:
+            raise ValueError("Task extracted from Complementary data is None")
+
+        annotation = complementary_data.get("annotation")
+
+        # Standardize to a list of strings for the tokenizer
+        if isinstance(task, str):
+            task = [task]
+        elif isinstance(task, list) and all(isinstance(t, str) for t in task):
+            task = task.copy()
+        else:
+            return None
+
+        # Keep task-only behavior when no annotation is provided.
+        if annotation is None:
+            return task
+
+        if isinstance(annotation, str):
+            annotation = [annotation]
+        elif not (isinstance(annotation, list) and all(isinstance(a, str) for a in annotation)):
+            return task
+
+        # Strict alignment: one annotation per task/frame.
+        if len(annotation) != len(task):
+            raise ValueError(
+                "Annotation batch size does not match task batch size: "
+                f"{len(annotation)} != {len(task)}"
+            )
+        
+        task_with_annotation = [self.add_atomic_step(t, a) for t, a in zip(task, annotation, strict=False)]
+        # print(task_with_annotation)
+        return task_with_annotation
 
     def get_subtask(self, transition: EnvTransition) -> list[str] | None:
         """
@@ -180,7 +257,14 @@ class TokenizerProcessorStep(ObservationProcessorStep):
         Returns:
             The updated observation dictionary including token IDs and an attention mask.
         """
-        task = self.get_task(self.transition)
+        complementary_data = self.transition.get(TransitionKey.COMPLEMENTARY_DATA)
+        has_annotations = isinstance(complementary_data, dict) and "annotation" in complementary_data
+        task = (
+            self.get_task_with_annotation(self.transition)
+            if has_annotations
+            else self.get_task(self.transition)
+        )
+
         if task is None:
             raise ValueError("Task cannot be None")
 

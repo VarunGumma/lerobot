@@ -172,11 +172,13 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     # Create Accelerator if not provided
     # It will automatically detect if running in distributed mode or single-process mode
     # We set step_scheduler_with_optimizer=False to prevent accelerate from adjusting the lr_scheduler steps based on the num_processes
-    # We set find_unused_parameters=True to handle models with conditional computation
+    # find_unused_parameters is configurable via cfg.ddp_find_unused_parameters
     if accelerator is None:
         from accelerate.utils import DistributedDataParallelKwargs
 
-        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+        ddp_kwargs = DistributedDataParallelKwargs(
+            find_unused_parameters=cfg.ddp_find_unused_parameters
+        )
         # Accelerate auto-detects the device based on the available hardware and ignores the policy.device setting.
         # Force the device to be CPU when policy.device is set to CPU.
         force_cpu = cfg.policy.device == "cpu"
