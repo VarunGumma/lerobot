@@ -53,6 +53,8 @@ class PI0FastConfig(PreTrainedConfig):
     empty_cameras: int = 0
 
     tokenizer_max_length: int = 200  # see openpi `__post_init__`
+    instruction_dropout: float = 0.0
+    annotation_dropout: float = 0.0
     text_tokenizer_name: str = "google/paligemma-3b-pt-224"
     action_tokenizer_name: str = "lerobot/fast-action-tokenizer"
     temperature: float = 0.0

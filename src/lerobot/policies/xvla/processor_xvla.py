@@ -68,6 +68,8 @@ def make_xvla_pre_post_processors(
             max_length=config.tokenizer_max_length,
             padding=config.pad_language_to,
             padding_side=config.tokenizer_padding_side,
+            instruction_dropout=config.instruction_dropout,
+            annotation_dropout=config.annotation_dropout,
         ),
         XVLAImageToFloatProcessorStep(),
         XVLAImageNetNormalizeProcessorStep(),

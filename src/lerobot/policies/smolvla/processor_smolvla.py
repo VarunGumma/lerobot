@@ -75,6 +75,8 @@ def make_smolvla_pre_post_processors(
             padding=config.pad_language_to,
             padding_side="right",
             max_length=config.tokenizer_max_length,
+            instruction_dropout=config.instruction_dropout,
+            annotation_dropout=config.annotation_dropout,
         ),
         DeviceProcessorStep(device=config.device),
         NormalizerProcessorStep(

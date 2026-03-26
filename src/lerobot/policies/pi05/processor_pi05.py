@@ -142,6 +142,8 @@ def make_pi05_pre_post_processors(
             max_length=config.tokenizer_max_length,
             padding_side="right",
             padding="max_length",
+            instruction_dropout=config.instruction_dropout,
+            annotation_dropout=config.annotation_dropout,
         ),
         DeviceProcessorStep(device=config.device),
     ]

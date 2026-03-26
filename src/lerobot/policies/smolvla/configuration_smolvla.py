@@ -61,6 +61,8 @@ class SmolVLAConfig(PreTrainedConfig):
 
     # Tokenizer
     tokenizer_max_length: int = 48
+    instruction_dropout: float = 0.0
+    annotation_dropout: float = 0.0
 
     # Decoding
     num_steps: int = 10

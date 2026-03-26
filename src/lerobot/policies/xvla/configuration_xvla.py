@@ -67,6 +67,8 @@ class XVLAConfig(PreTrainedConfig):
     tokenizer_max_length: int = 64
     tokenizer_padding_side: str = "right"
     pad_language_to: str = "max_length"
+    instruction_dropout: float = 0.0
+    annotation_dropout: float = 0.0
 
     # Transformer head
     hidden_size: int = 1024

@@ -325,6 +325,8 @@ def test_get_config_with_tokenizer_name(mock_auto_tokenizer):
         "padding_side": "right",
         "padding": "longest",
         "truncation": False,
+        "instruction_dropout": 0.0,
+        "annotation_dropout": 0.0,
     }
 
     assert config == expected
@@ -352,6 +354,8 @@ def test_get_config_with_tokenizer_object():
         "padding_side": "right",
         "padding": "longest",
         "truncation": False,
+        "instruction_dropout": 0.0,
+        "annotation_dropout": 0.0,
     }
 
     assert config == expected
@@ -1441,6 +1445,83 @@ def test_subtask_tokenization_deterministic():
     # Results should be identical
     assert torch.equal(subtask_tokens1, subtask_tokens2)
     assert torch.equal(subtask_mask1, subtask_mask2)
+
+
+@require_package("transformers")
+def test_instruction_annotation_dropout_instruction_case():
+    """Test instruction erasure when the sampled case is instruction."""
+    mock_tokenizer = MockTokenizer(vocab_size=100)
+    processor = TokenizerProcessorStep(
+        tokenizer=mock_tokenizer,
+        instruction_dropout=1.0,
+        annotation_dropout=1.0,
+    )
+
+    transition = create_transition(
+        observation={"state": torch.tensor([1.0, 2.0])},
+        action=torch.tensor([0.1, 0.2]),
+        complementary_data={
+            "task": ["Task: pick block, State: x;"],
+            "annotation": ["align gripper"],
+        },
+    )
+
+    with patch("lerobot.processor.tokenizer_processor.random.choice", return_value="instruction"):
+        with patch("lerobot.processor.tokenizer_processor.random.random", return_value=0.0):
+            result = processor.get_task_with_annotation(transition)
+
+    assert result == ["Control Plan: align gripper, State: x;"]
+
+
+@require_package("transformers")
+def test_instruction_annotation_dropout_annotation_case():
+    """Test annotation erasure when the sampled case is annotation."""
+    mock_tokenizer = MockTokenizer(vocab_size=100)
+    processor = TokenizerProcessorStep(
+        tokenizer=mock_tokenizer,
+        instruction_dropout=1.0,
+        annotation_dropout=1.0,
+    )
+
+    transition = create_transition(
+        observation={"state": torch.tensor([1.0, 2.0])},
+        action=torch.tensor([0.1, 0.2]),
+        complementary_data={
+            "task": ["Task: pick block, State: x;"],
+            "annotation": ["align gripper"],
+        },
+    )
+
+    with patch("lerobot.processor.tokenizer_processor.random.choice", return_value="annotation"):
+        with patch("lerobot.processor.tokenizer_processor.random.random", return_value=0.0):
+            result = processor.get_task_with_annotation(transition)
+
+    assert result == ["Task: pick block, State: x;"]
+
+
+@require_package("transformers")
+def test_instruction_annotation_dropout_neither_case():
+    """Test no erasure when the sampled case is neither."""
+    mock_tokenizer = MockTokenizer(vocab_size=100)
+    processor = TokenizerProcessorStep(
+        tokenizer=mock_tokenizer,
+        instruction_dropout=1.0,
+        annotation_dropout=1.0,
+    )
+
+    transition = create_transition(
+        observation={"state": torch.tensor([1.0, 2.0])},
+        action=torch.tensor([0.1, 0.2]),
+        complementary_data={
+            "task": ["Task: pick block, State: x;"],
+            "annotation": ["align gripper"],
+        },
+    )
+
+    with patch("lerobot.processor.tokenizer_processor.random.choice", return_value="neither"):
+        result = processor.get_task_with_annotation(transition)
+
+    assert result == ["Task: pick block, Control Plan: align gripper, State: x;"]
 
 
 @require_package("transformers")

@@ -24,6 +24,7 @@ token IDs and attention masks, which are then added to the observation dictionar
 from __future__ import annotations
 
 import logging
+import random
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -81,6 +82,8 @@ class TokenizerProcessorStep(ObservationProcessorStep):
     padding_side: str = "right"
     padding: str = "max_length"
     truncation: bool = True
+    instruction_dropout: float = 0.0
+    annotation_dropout: float = 0.0
 
     # Internal tokenizer instance (not part of the config)
     input_tokenizer: Any = field(default=None, init=False, repr=False)
@@ -115,6 +118,51 @@ class TokenizerProcessorStep(ObservationProcessorStep):
                 "Pass a tokenizer object directly or a tokenizer name to auto-load."
             )
 
+        if not 0.0 <= self.instruction_dropout <= 1.0:
+            raise ValueError(
+                f"instruction_dropout must be in [0, 1], got {self.instruction_dropout}"
+            )
+
+        if not 0.0 <= self.annotation_dropout <= 1.0:
+            raise ValueError(
+                f"annotation_dropout must be in [0, 1], got {self.annotation_dropout}"
+            )
+
+    def _apply_instruction_annotation_dropout(
+        self, task: list[str], annotation: list[str] | None
+    ) -> tuple[list[str], list[str] | None]:
+        """Apply per-sample instruction/annotation erasure before tokenization.
+
+        For each sample, one of three cases is selected uniformly:
+        1) instruction candidate for erasure
+        2) annotation candidate for erasure
+        3) neither
+
+        The selected candidate is then erased (set to "") according to the corresponding
+        dropout probability.
+        """
+        dropped_task = task.copy()
+
+        if annotation is None:
+            if self.instruction_dropout <= 0.0:
+                return dropped_task, None
+            for i in range(len(dropped_task)):
+                if random.random() < self.instruction_dropout:
+                    dropped_task[i] = ""
+            return dropped_task, None
+
+        dropped_annotation = annotation.copy()
+        for i in range(len(dropped_task)):
+            case = random.choice(("instruction", "annotation", "neither"))
+            if case == "instruction":
+                if random.random() < self.instruction_dropout:
+                    dropped_task[i] = ""
+            elif case == "annotation":
+                if random.random() < self.annotation_dropout:
+                    dropped_annotation[i] = ""
+
+        return dropped_task, dropped_annotation
+
     def get_task(self, transition: EnvTransition) -> list[str] | None:
         """
         Extracts the task description(s) from the transition's complementary data.
@@ -141,12 +189,14 @@ class TokenizerProcessorStep(ObservationProcessorStep):
 
         return None
     
-    def add_atomic_step(self, task_state_str: str, atomic_step: str) -> str:
+    def _add_atomic_step(self, task_state_str: str, atomic_step: str) -> str:
         """
         Convert:
             'Task: <task>, State: <state>;'
         into:
             'Task: <task>, Control Plan: <atomic_step>, State: <state>;'
+
+        If task or atomic_step is empty, omit the corresponding prefixed segment.
         """
 
         prefix = "Task:"
@@ -159,16 +209,19 @@ class TokenizerProcessorStep(ObservationProcessorStep):
             raise ValueError("Input must contain ', State:'")
 
         task_part, state_part = task_state_str.split(state_marker, 1)
-
-        # Remove 'Task:' prefix and trim whitespace
-        task_text = task_part[len(prefix):].strip()
-
-        # Avoid duplicate punctuation before appending subtask
-        task_text = task_text.rstrip(" .")
-
+        task_text = task_part[len(prefix):].strip().rstrip(" .")
         atomic_step = atomic_step.strip().rstrip(" .")
 
-        return f"Task: {task_text}, Control Plan: {atomic_step}, State:{state_part}"
+        segments = []
+        
+        if task_text:
+            segments.append(f"Task: {task_text}")
+
+        if atomic_step:
+            segments.append(f"Control Plan: {atomic_step}")
+
+        segments.append(f"State:{state_part}")
+        return ", ".join(segments)
 
     def get_task_with_annotation(self, transition: EnvTransition) -> list[str] | None:
         """
@@ -214,8 +267,9 @@ class TokenizerProcessorStep(ObservationProcessorStep):
                 f"{len(annotation)} != {len(task)}"
             )
         
-        task_with_annotation = [self.add_atomic_step(t, a) for t, a in zip(task, annotation, strict=False)]
-        # print(task_with_annotation)
+        task, annotation = self._apply_instruction_annotation_dropout(task, annotation)
+        task_with_annotation = [self._add_atomic_step(t, a) for t, a in zip(task, annotation, strict=False)]
+
         return task_with_annotation
 
     def get_subtask(self, transition: EnvTransition) -> list[str] | None:
@@ -369,6 +423,8 @@ class TokenizerProcessorStep(ObservationProcessorStep):
             "padding_side": self.padding_side,
             "padding": self.padding,
             "truncation": self.truncation,
+            "instruction_dropout": self.instruction_dropout,
+            "annotation_dropout": self.annotation_dropout,
         }
 
         # Only save tokenizer_name if it was used to create the tokenizer

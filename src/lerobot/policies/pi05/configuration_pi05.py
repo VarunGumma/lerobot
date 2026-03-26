@@ -62,6 +62,8 @@ class PI05Config(PreTrainedConfig):
     empty_cameras: int = 0
 
     tokenizer_max_length: int = 200  # see openpi `__post_init__`
+    instruction_dropout: float = 0.0
+    annotation_dropout: float = 0.0
 
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {

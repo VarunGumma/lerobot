@@ -95,6 +95,8 @@ class PI0Config(PreTrainedConfig):
     scheduler_decay_lr: float = 2.5e-6
 
     tokenizer_max_length: int = 48  # see openpi `__post_init__`
+    instruction_dropout: float = 0.0
+    annotation_dropout: float = 0.0
 
     def __post_init__(self):
         super().__post_init__()
