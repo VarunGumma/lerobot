@@ -363,6 +363,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         revision: str | None = None,
         force_cache_sync: bool = False,
         download_videos: bool = True,
+        load_annotations: bool = False,
         video_backend: str | None = None,
     ):
         """
@@ -463,6 +464,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
             download_videos (bool, optional): Flag to download the videos. Note that when set to True but the
                 video files are already present on local disk, they won't be downloaded again. Defaults to
                 True.
+            load_annotations (bool, optional): Whether to expose per-frame annotations (if present in dataset
+                features) in each returned sample under the "annotation" key. Defaults to False.
             video_backend (str | None, optional): Video backend to use for decoding videos. Defaults to torchcodec when available int the platform; otherwise, defaults to 'pyav'.
                 You can also use the 'pyav' decoder used by Torchvision, which used to be the default option, or 'video_reader' which is another decoder of Torchvision.
         """
@@ -475,6 +478,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self.tolerance_s = tolerance_s
         self.revision = revision if revision else CODEBASE_VERSION
         self.video_backend = video_backend if video_backend else get_safe_default_codec()
+        self.load_annotations = load_annotations
         self.delta_indices = None
 
         # Unused attributes
@@ -487,6 +491,11 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self.meta = LeRobotDatasetMetadata(
             self.repo_id, self.root, self.revision, force_cache_sync=force_cache_sync
         )
+        if self.load_annotations and "annotation" not in self.meta.features:
+            raise ValueError(
+                "dataset.load_annotations is enabled but this dataset has no 'annotation' feature. "
+                "Disable it with --dataset.load_annotations=false."
+            )
         if self.episodes is not None and self.meta._version >= packaging.version.parse("v2.1"):
             episodes_stats = [self.meta.episodes_stats[ep_idx] for ep_idx in self.episodes]
             self.stats = aggregate_stats(episodes_stats)
@@ -747,6 +756,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
         # Add task as a string
         task_idx = item["task_index"].item()
         item["task"] = self.meta.tasks[task_idx]
+
+        # Keep annotation as a separate per-frame field when enabled.
+        if not self.load_annotations and "annotation" in item:
+            item.pop("annotation")
 
         return item
 
