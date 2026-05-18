@@ -123,7 +123,7 @@ lerobot-record \
   --dataset.single_task="Grab and handover the red cube to the other arm" \
   --dataset.streaming_encoding=true \
   --dataset.encoder_threads=2 \
-  # --dataset.vcodec=auto \
+  # --dataset.camera_encoder.vcodec=auto \
   --policy.path=<user>/groot-bimanual \ # your trained model
   --dataset.episode_time_s=30 \
   --dataset.reset_time_s=10
@@ -131,4 +131,4 @@ lerobot-record \
 
 ## License
 
-This model follows the **Apache 2.0 License**, consistent with the original [GR00T repository](https://github.com/NVIDIA/Isaac-GR00T).
+This model follows NVIDIA's proprietary license, consistent with the original [GR00T repository](https://github.com/NVIDIA/Isaac-GR00T). Future versions (starting from N1.7) will follow **Apache 2.0 License**.

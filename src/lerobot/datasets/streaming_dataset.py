@@ -22,20 +22,25 @@ import numpy as np
 import torch
 from datasets import load_dataset
 
-from lerobot.datasets.dataset_metadata import CODEBASE_VERSION, LeRobotDatasetMetadata
-from lerobot.datasets.feature_utils import get_delta_indices
-from lerobot.datasets.io_utils import item_to_torch
-from lerobot.datasets.utils import (
+from lerobot.utils.constants import (
+    HF_LEROBOT_HOME,
+    LOOKAHEAD_BACKTRACKTABLE,
+    LOOKBACK_BACKTRACKTABLE,
+)
+
+from .dataset_metadata import CODEBASE_VERSION, LeRobotDatasetMetadata
+from .feature_utils import get_delta_indices
+from .io_utils import item_to_torch
+from .utils import (
     check_version_compatibility,
     find_float_index,
     is_float_in_list,
     safe_shard,
 )
-from lerobot.datasets.video_utils import (
+from .video_utils import (
     VideoDecoderCache,
     decode_video_frames_torchcodec,
 )
-from lerobot.utils.constants import HF_LEROBOT_HOME, LOOKAHEAD_BACKTRACKTABLE, LOOKBACK_BACKTRACKTABLE
 
 
 class LookBackError(Exception):
@@ -86,7 +91,14 @@ class Backtrackable[T]:
     ```
     """
 
-    __slots__ = ("_source", "_back_buf", "_ahead_buf", "_cursor", "_history", "_lookahead")
+    __slots__ = (
+        "_source",
+        "_back_buf",
+        "_ahead_buf",
+        "_cursor",
+        "_history",
+        "_lookahead",
+    )
 
     def __init__(self, iterable: Iterable[T], *, history: int = 1, lookahead: int = 0):
         if history < 1:
@@ -96,7 +108,9 @@ class Backtrackable[T]:
 
         self._source: Iterator[T] = iter(iterable)
         self._back_buf: deque[T] = deque(maxlen=history)
-        self._ahead_buf: deque[T] = deque(maxlen=lookahead) if lookahead > 0 else deque()
+        self._ahead_buf: deque[T] = (
+            deque(maxlen=lookahead) if lookahead > 0 else deque()
+        )
         self._cursor: int = 0
         self._history = history
         self._lookahead = lookahead
@@ -251,12 +265,15 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
         rng: np.random.Generator | None = None,
         shuffle: bool = True,
         load_annotations: bool = True,
+        return_uint8: bool = False,
     ):
         """Initialize a StreamingLeRobotDataset.
 
         Args:
             repo_id (str): This is the repo id that will be used to fetch the dataset.
-            root (Path | None, optional): Local directory to use for downloading/writing files.
+            root (Path | None, optional): Local directory to use for local datasets. When omitted, Hub
+                metadata is resolved through a revision-safe snapshot cache under
+                ``$HF_LEROBOT_HOME/hub``.
             episodes (list[int] | None, optional): If specified, this will only load episodes specified by
                 their episode_index in this list.
             image_transforms (Callable | None, optional): Transform to apply to image data.
@@ -274,7 +291,12 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
         """
         super().__init__()
         self.repo_id = repo_id
-        self.root = Path(root) if root else HF_LEROBOT_HOME / repo_id
+        self._requested_root = Path(root) if root else None
+        self.root = (
+            self._requested_root
+            if self._requested_root is not None
+            else HF_LEROBOT_HOME / repo_id
+        )
         self.streaming_from_local = root is not None
 
         self.image_transforms = image_transforms
@@ -288,15 +310,20 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
 
         self.streaming = streaming
         self.buffer_size = buffer_size
+        self._return_uint8 = return_uint8
 
         # We cache the video decoders to avoid re-initializing them at each frame (avoiding a ~10x slowdown)
         self.video_decoder_cache = None
 
-        self.root.mkdir(exist_ok=True, parents=True)
+        if self._requested_root is not None:
+            self.root.mkdir(exist_ok=True, parents=True)
 
         # Load metadata
         self.meta = LeRobotDatasetMetadata(
-            self.repo_id, self.root, self.revision, force_cache_sync=force_cache_sync
+            self.repo_id,
+            self._requested_root,
+            self.revision,
+            force_cache_sync=force_cache_sync,
         )
 
         if self.load_annotations and "annotations" not in self.meta.episodes.features:
@@ -304,6 +331,9 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
                 "dataset.load_annotations is enabled but this dataset has no episode annotations metadata. "
                 "Disable it with --dataset.load_annotations=false."
             )
+
+        self.root = self.meta.root
+        self.revision = self.meta.revision
         # Check version
         check_version_compatibility(self.repo_id, self.meta._version, CODEBASE_VERSION)
 
@@ -311,7 +341,9 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
         self.delta_indices = None
 
         if delta_timestamps is not None:
-            self._validate_delta_timestamp_keys(delta_timestamps)  # raises ValueError if invalid
+            self._validate_delta_timestamp_keys(
+                delta_timestamps
+            )  # raises ValueError if invalid
             self.delta_timestamps = delta_timestamps
             self.delta_indices = get_delta_indices(self.delta_timestamps, self.fps)
 
@@ -342,10 +374,14 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
         rng: np.random.Generator, buffer_size: int, random_batch_size=100
     ) -> Iterator[int]:
         while True:
-            yield from (int(i) for i in rng.integers(0, buffer_size, size=random_batch_size))
+            yield from (
+                int(i) for i in rng.integers(0, buffer_size, size=random_batch_size)
+            )
 
     @staticmethod
-    def _infinite_generator_over_elements(rng: np.random.Generator, elements: list[int]) -> Iterator[int]:
+    def _infinite_generator_over_elements(
+        rng: np.random.Generator, elements: list[int]
+    ) -> Iterator[int]:
         while True:
             yield rng.choice(elements)
 
@@ -363,7 +399,9 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
         buffer_indices_generator = self._iter_random_indices(rng, self.buffer_size)
 
         idx_to_backtrack_dataset = {
-            idx: self._make_backtrackable_dataset(safe_shard(self.hf_dataset, idx, self.num_shards))
+            idx: self._make_backtrackable_dataset(
+                safe_shard(self.hf_dataset, idx, self.num_shards)
+            )
             for idx in range(self.num_shards)
         }
 
@@ -373,13 +411,19 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
         # (2) sample one frame from the shard sampled at (1)
         frames_buffer = []
         while available_shards := list(idx_to_backtrack_dataset.keys()):
-            shard_key = next(self._infinite_generator_over_elements(rng, available_shards))
-            backtrack_dataset = idx_to_backtrack_dataset[shard_key]  # selects which shard to iterate on
+            shard_key = next(
+                self._infinite_generator_over_elements(rng, available_shards)
+            )
+            backtrack_dataset = idx_to_backtrack_dataset[
+                shard_key
+            ]  # selects which shard to iterate on
 
             try:
                 for frame in self.make_frame(backtrack_dataset):
                     if len(frames_buffer) == self.buffer_size:
-                        i = next(buffer_indices_generator)  # samples a element from the buffer
+                        i = next(
+                            buffer_indices_generator
+                        )  # samples a element from the buffer
                         yield frames_buffer[i]
                         frames_buffer[i] = frame
                     else:
@@ -389,14 +433,18 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
                 RuntimeError,
                 StopIteration,
             ):  # NOTE: StopIteration inside a generator throws a RuntimeError since python 3.7
-                del idx_to_backtrack_dataset[shard_key]  # Remove exhausted shard, onto another shard
+                del idx_to_backtrack_dataset[
+                    shard_key
+                ]  # Remove exhausted shard, onto another shard
 
         # Once shards are all exhausted, shuffle the buffer and yield the remaining frames
         rng.shuffle(frames_buffer)
         yield from frames_buffer
 
     def _get_window_steps(
-        self, delta_timestamps: dict[str, list[float]] | None = None, dynamic_bounds: bool = False
+        self,
+        delta_timestamps: dict[str, list[float]] | None = None,
+        dynamic_bounds: bool = False,
     ) -> tuple[int, int]:
         if delta_timestamps is None:
             return 1, 1
@@ -416,7 +464,9 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
 
         return lookback, lookahead
 
-    def _make_backtrackable_dataset(self, dataset: datasets.IterableDataset) -> Backtrackable:
+    def _make_backtrackable_dataset(
+        self, dataset: datasets.IterableDataset
+    ) -> Backtrackable:
         lookback, lookahead = self._get_window_steps(self.delta_timestamps)
         return Backtrackable(dataset, history=lookback, lookahead=lookahead)
 
@@ -435,7 +485,9 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
 
     def _make_padding_camera_frame(self, camera_key: str):
         """Variable-shape padding frame for given camera keys, given in (H, W, C)"""
-        return torch.zeros(self.meta.info["features"][camera_key]["shape"]).permute(-1, 0, 1)
+        return torch.zeros(self.meta.info.features[camera_key]["shape"]).permute(
+            -1, 0, 1
+        )
 
     def _get_video_frame_padding_mask(
         self,
@@ -469,7 +521,9 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
         item = next(dataset_iterator)
         item = item_to_torch(item)
 
-        updates = []  # list of "updates" to apply to the item retrieved from hf_dataset (w/o camera features)
+        updates = (
+            []
+        )  # list of "updates" to apply to the item retrieved from hf_dataset (w/o camera features)
 
         # Get episode index from the item
         ep_idx = item["episode_index"]
@@ -493,7 +547,9 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
 
         # Load video frames, when needed
         if len(self.meta.video_keys) > 0:
-            original_timestamps = self._make_timestamps_from_indices(current_ts, self.delta_indices)
+            original_timestamps = self._make_timestamps_from_indices(
+                current_ts, self.delta_indices
+            )
 
             # Some timestamps might not result available considering the episode's boundaries
             query_timestamps = self._get_query_timestamps(
@@ -524,7 +580,9 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
         if self.load_annotations and "annotations" in self.meta.episodes.features:
             ep_annotations = self.meta.episodes[ep_idx]["annotations"]
             frame_idx = int(item["frame_index"])
-            if isinstance(ep_annotations, list) and 0 <= frame_idx < len(ep_annotations):
+            if isinstance(ep_annotations, list) and 0 <= frame_idx < len(
+                ep_annotations
+            ):
                 result["annotation"] = ep_annotations[frame_idx]
 
         yield result
@@ -536,7 +594,9 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
         episode_boundaries_ts: dict[str, tuple[float, float]] | None = None,
     ) -> dict[str, list[float]]:
         query_timestamps = {}
-        keys_to_timestamps = self._make_timestamps_from_indices(current_ts, query_indices)
+        keys_to_timestamps = self._make_timestamps_from_indices(
+            current_ts, query_indices
+        )
         for key in self.meta.video_keys:
             if query_indices is not None and key in query_indices:
                 timestamps = keys_to_timestamps[key]
@@ -550,7 +610,9 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
 
         return query_timestamps
 
-    def _query_videos(self, query_timestamps: dict[str, list[float]], ep_idx: int) -> dict:
+    def _query_videos(
+        self, query_timestamps: dict[str, list[float]], ep_idx: int
+    ) -> dict:
         """Note: When using data workers (e.g. DataLoader with num_workers>0), do not call this function
         in the main process (e.g. by using a second Dataloader with num_workers=0). It will result in a
         Segmentation Fault. This probably happens because a memory reference to the video loader is created in
@@ -559,10 +621,18 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
 
         item = {}
         for video_key, query_ts in query_timestamps.items():
-            root = self.meta.url_root if self.streaming and not self.streaming_from_local else self.root
+            root = (
+                self.meta.url_root
+                if self.streaming and not self.streaming_from_local
+                else self.root
+            )
             video_path = f"{root}/{self.meta.get_video_file_path(ep_idx, video_key)}"
             frames = decode_video_frames_torchcodec(
-                video_path, query_ts, self.tolerance_s, decoder_cache=self.video_decoder_cache
+                video_path,
+                query_ts,
+                self.tolerance_s,
+                decoder_cache=self.video_decoder_cache,
+                return_uint8=self._return_uint8,
             )
 
             item[video_key] = frames.squeeze(0) if len(query_ts) == 1 else frames
@@ -597,8 +667,12 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
             delta_results = {}
 
             # Separate and sort deltas by difficulty (easier operations first)
-            negative_deltas = sorted([d for d in delta_indices if d < 0], reverse=True)  # [-1, -2, -3, ...]
-            positive_deltas = sorted([d for d in delta_indices if d > 0])  # [1, 2, 3, ...]
+            negative_deltas = sorted(
+                [d for d in delta_indices if d < 0], reverse=True
+            )  # [-1, -2, -3, ...]
+            positive_deltas = sorted(
+                [d for d in delta_indices if d > 0]
+            )  # [1, 2, 3, ...]
             zero_deltas = [d for d in delta_indices if d == 0]
 
             # Process zero deltas (current frame)
@@ -629,13 +703,19 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
                             last_successful_frame = past_item[key]
 
                         else:
-                            raise LookBackError("Retrieved frame is from different episode!")
+                            raise LookBackError(
+                                "Retrieved frame is from different episode!"
+                            )
                     else:
-                        raise LookBackError("Cannot go back further than the history buffer!")
+                        raise LookBackError(
+                            "Cannot go back further than the history buffer!"
+                        )
 
                 except LookBackError:
                     delta_results[delta] = (last_successful_frame, True)
-                    lookback_failed = True  # All subsequent negative deltas will also fail
+                    lookback_failed = (
+                        True  # All subsequent negative deltas will also fail
+                    )
 
             # Process positive deltas in order of increasing difficulty
             lookahead_failed = False
@@ -656,13 +736,19 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
                             last_successful_frame = future_item[key]
 
                         else:
-                            raise LookAheadError("Retrieved frame is from different episode!")
+                            raise LookAheadError(
+                                "Retrieved frame is from different episode!"
+                            )
                     else:
-                        raise LookAheadError("Cannot go ahead further than the lookahead buffer!")
+                        raise LookAheadError(
+                            "Cannot go ahead further than the lookahead buffer!"
+                        )
 
                 except LookAheadError:
                     delta_results[delta] = (last_successful_frame, True)
-                    lookahead_failed = True  # All subsequent positive deltas will also fail
+                    lookahead_failed = (
+                        True  # All subsequent positive deltas will also fail
+                    )
 
             # Reconstruct original order for stacking
             for delta in delta_indices:
@@ -679,7 +765,9 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
 
         return query_result, padding
 
-    def _validate_delta_timestamp_keys(self, delta_timestamps: dict[list[float]]) -> None:
+    def _validate_delta_timestamp_keys(
+        self, delta_timestamps: dict[list[float]]
+    ) -> None:
         """
         Validate that all keys in delta_timestamps correspond to actual features in the dataset.
 
