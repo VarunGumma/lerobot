@@ -262,6 +262,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             delta_timestamps=delta_timestamps,
             image_transforms=image_transforms,
             return_uint8=self._return_uint8,
+            load_annotations=self.load_annotations,
         )
 
         # Load actual data
@@ -329,6 +330,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 delta_timestamps=self.delta_timestamps,
                 image_transforms=self.image_transforms,
                 return_uint8=self._return_uint8,
+                load_annotations=self.load_annotations,
             )
         return self.reader
 

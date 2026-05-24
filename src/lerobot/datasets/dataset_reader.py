@@ -51,6 +51,7 @@ class DatasetReader:
         delta_timestamps: dict[str, list[float]] | None,
         image_transforms: Callable | None,
         return_uint8: bool = False,
+        load_annotations: bool = True,
     ):
         """Initialize the reader with metadata, filtering, and transform config.
 
@@ -76,6 +77,7 @@ class DatasetReader:
         self._video_backend = video_backend
         self._image_transforms = image_transforms
         self._return_uint8 = return_uint8
+        self._load_annotations = load_annotations
 
         self.hf_dataset: datasets.Dataset | None = None
         self._absolute_to_relative_idx: dict[int, int] | None = None
@@ -299,5 +301,11 @@ class DatasetReader:
         if "subtask_index" in self._meta.features and self._meta.subtasks is not None:
             subtask_idx = item["subtask_index"].item()
             item["subtask"] = self._meta.subtasks.iloc[subtask_idx].name
+
+        if self._load_annotations and "annotations" in self._meta.episodes.features:
+            ep_annotations = self._meta.episodes[ep_idx]["annotations"]
+            frame_idx = int(item["frame_index"].item())
+            if isinstance(ep_annotations, list) and 0 <= frame_idx < len(ep_annotations):
+                item["annotation"] = ep_annotations[frame_idx]
 
         return item

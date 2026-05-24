@@ -190,6 +190,26 @@ def test_save_episode_persists_annotations_as_episode_metadata(tmp_path):
     assert episodes[0]["annotations"] == annotations
 
 
+def test_read_dataset_exposes_annotations_when_enabled(tmp_path):
+    """load_annotations=True exposes the per-frame annotation on read."""
+    root = tmp_path / "ds"
+    dataset = LeRobotDataset.create(repo_id=DUMMY_REPO_ID, fps=DEFAULT_FPS, features=SIMPLE_FEATURES, root=root)
+    annotations = ["LEFT_ARM MOVE; RIGHT_ARM HOLD", "LEFT_ARM GRASP; RIGHT_ARM RELEASE"]
+    dataset.writer.episode_buffer["annotations"] = annotations
+
+    for _ in annotations:
+        dataset.add_frame(_make_frame(SIMPLE_FEATURES))
+    dataset.save_episode()
+    dataset.finalize()
+
+    loaded = LeRobotDataset(DUMMY_REPO_ID, root=root, load_annotations=True)
+    assert loaded[0]["annotation"] == annotations[0]
+    assert loaded[1]["annotation"] == annotations[1]
+
+    loaded_without_annotations = LeRobotDataset(DUMMY_REPO_ID, root=root, load_annotations=False)
+    assert "annotation" not in loaded_without_annotations[0]
+
+
 def test_save_multiple_episodes(tmp_path):
     """Recording 3 episodes results in correct total counts."""
     dataset = LeRobotDataset.create(
