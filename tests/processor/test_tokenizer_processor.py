@@ -110,6 +110,7 @@ class MockPaliGemmaTokenizer:
         "Action: ": [200, 201],
         "|": [300],
         "open drawer\n": [100, 101],
+        "LEFT_ARM: HOLD_POSE\nRIGHT_ARM: MOVE backward-left\n": [120, 121, 122, 123],
         "grasp handle\n": [110, 111],
     }
     id_to_token = {
@@ -117,6 +118,10 @@ class MockPaliGemmaTokenizer:
         101: "drawer",
         110: "grasp",
         111: "handle",
+        120: "LEFT_ARM",
+        121: "HOLD_POSE",
+        122: "RIGHT_ARM",
+        123: "MOVE",
         200: "Action",
         201: ":",
         300: "|",
@@ -129,6 +134,10 @@ class MockPaliGemmaTokenizer:
         "drawer": 101,
         "grasp": 110,
         "handle": 111,
+        "LEFT_ARM": 120,
+        "HOLD_POSE": 121,
+        "RIGHT_ARM": 122,
+        "MOVE": 123,
         "Action": 200,
         ":": 201,
         "|": 300,
@@ -765,16 +774,16 @@ def test_action_tokenizer_prepends_annotation_target_tokens(mock_auto_tokenizer)
 
     transition = create_transition(
         action=torch.zeros(1, 2),
-        complementary_data={"annotation": ["open drawer"]},
+        complementary_data={"annotation": ["LEFT_ARM: HOLD_POSE; RIGHT_ARM: MOVE backward-left"]},
     )
 
     result = processor(transition)
     tokens = result[TransitionKey.COMPLEMENTARY_DATA][ACTION_TOKENS]
     mask = result[TransitionKey.COMPLEMENTARY_DATA][ACTION_TOKEN_MASK]
 
-    expected = torch.tensor([[999, 100, 101, 200, 201, 864, 863, 300, 0, 0, 0, 0]])
+    expected = torch.tensor([[999, 120, 121, 122, 123, 200, 201, 864, 863, 300, 0, 0]])
     expected_mask = torch.tensor(
-        [[True, True, True, True, True, True, True, True, False, False, False, False]]
+        [[True, True, True, True, True, True, True, True, True, True, False, False]]
     )
     assert torch.equal(tokens, expected)
     assert torch.equal(mask, expected_mask)

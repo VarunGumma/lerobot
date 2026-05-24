@@ -458,6 +458,7 @@ class ActionTokenizerProcessorStep(ActionProcessorStep):
 
     def _tokenize_annotation_target(self, annotation: str, device: torch.device) -> torch.Tensor:
         annotation = annotation.strip()
+        annotation = annotation.replace("; RIGHT_ARM:", "\nRIGHT_ARM:")
         if not annotation:
             return torch.empty(0, dtype=torch.long, device=device)
 
