@@ -27,6 +27,7 @@ pytest.importorskip("datasets", reason="datasets is required (install lerobot[da
 
 from lerobot.configs import VideoEncoderConfig
 from lerobot.datasets.dataset_writer import _encode_video_worker
+from lerobot.datasets.io_utils import load_episodes
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.utils import DEFAULT_IMAGE_PATH
 from tests.fixtures.constants import DEFAULT_FPS, DUMMY_REPO_ID
@@ -170,6 +171,23 @@ def test_save_episode_resets_buffer(tmp_path):
     dataset.save_episode()
 
     assert dataset.writer.episode_buffer["size"] == 0
+
+
+def test_save_episode_persists_annotations_as_episode_metadata(tmp_path):
+    """Per-frame annotations are stored in meta/episodes, not as frame features."""
+    dataset = LeRobotDataset.create(
+        repo_id=DUMMY_REPO_ID, fps=DEFAULT_FPS, features=SIMPLE_FEATURES, root=tmp_path / "ds"
+    )
+    annotations = ["LEFT_ARM MOVE; RIGHT_ARM HOLD", "LEFT_ARM GRASP; RIGHT_ARM HOLD"]
+    dataset.writer.episode_buffer["annotations"] = annotations
+
+    for _ in annotations:
+        dataset.add_frame(_make_frame(SIMPLE_FEATURES))
+    dataset.save_episode()
+    dataset.finalize()
+
+    episodes = load_episodes(dataset.root)
+    assert episodes[0]["annotations"] == annotations
 
 
 def test_save_multiple_episodes(tmp_path):

@@ -235,6 +235,7 @@ class DatasetWriter:
         # size and task are special cases that won't be added to hf_dataset
         episode_length = episode_buffer.pop("size")
         tasks = episode_buffer.pop("task")
+        episode_annotations = episode_buffer.pop("annotations", None)
         episode_tasks = list(set(tasks))
         episode_index = episode_buffer["episode_index"]
 
@@ -319,7 +320,14 @@ class DatasetWriter:
                     ep_metadata.update(self._save_episode_video(video_key, episode_index))
 
         # `meta.save_episode` need to be executed after encoding the videos
-        self._meta.save_episode(episode_index, episode_length, episode_tasks, ep_stats, ep_metadata)
+        self._meta.save_episode(
+            episode_index,
+            episode_length,
+            episode_tasks,
+            episode_annotations,
+            ep_stats,
+            ep_metadata,
+        )
 
         if has_video_keys and use_batched_encoding:
             self._episodes_since_last_encoding += 1
