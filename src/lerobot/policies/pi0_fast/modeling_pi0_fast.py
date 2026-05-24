@@ -1303,6 +1303,16 @@ class PI0FastPolicy(PreTrainedPolicy):
 
         return np.stack(decoded_actions)
 
+    @staticmethod
+    def _find_token_subsequence(token_seq: list[str], subsequence: list[str]) -> int | None:
+        if not subsequence:
+            return None
+
+        for i in range(len(token_seq) - len(subsequence) + 1):
+            if token_seq[i : i + len(subsequence)] == subsequence:
+                return i
+        return None
+
     def detokenize_actions(
         self, tokens: torch.Tensor, action_horizon: int, action_dim: int
     ) -> torch.Tensor:
@@ -1345,31 +1355,23 @@ class PI0FastPolicy(PreTrainedPolicy):
         )
         action_prefix_len = len(action_prefix_tokens)
 
-        # Clean tokens by removing everything after the first "|" (end-of-action marker)
-        # and removing all occurrences of "Action: " token sequence
-        # assert that beginning contain "Action: "
         if self.config.validate_action_token_prefix:
             for token_seq in decoded_tokens:
-                assert (
-                    len(token_seq) >= 2
-                    and token_seq[0] == "Action"
-                    and token_seq[1] == ":"
-                ), f"Token sequence does not start with ['Action', ':']: {token_seq}"
+                assert self._find_token_subsequence(token_seq, action_prefix_tokens) is not None, (
+                    f"Token sequence does not contain action prefix {action_prefix_tokens}: {token_seq}"
+                )
 
         cleaned_tokens = []
         for token_seq in decoded_tokens:
-            # Remove everything after "|"
+            # Generated text may start with annotation tokens. Keep only the FAST action
+            # tokens after the first "Action: " marker.
+            action_prefix_start = self._find_token_subsequence(token_seq, action_prefix_tokens)
+            if action_prefix_start is not None:
+                token_seq = token_seq[action_prefix_start + action_prefix_len :]
+
+            # Remove everything after the action end marker.
             if "|" in token_seq:
                 token_seq = token_seq[: token_seq.index("|")]
-
-            # Remove all occurrences of "Action: " token sequence
-            i = 0
-            while i <= len(token_seq) - action_prefix_len:
-                if token_seq[i : i + action_prefix_len] == action_prefix_tokens:
-                    # Found a match, remove it
-                    token_seq = token_seq[:i] + token_seq[i + action_prefix_len :]
-                else:
-                    i += 1
 
             cleaned_tokens.append(token_seq)
 

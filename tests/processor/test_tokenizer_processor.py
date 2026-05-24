@@ -19,17 +19,22 @@ Tests for the TokenizerProcessorStep class.
 """
 
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 import torch
 
 from lerobot.configs.types import FeatureType, PipelineFeatureType, PolicyFeature
-from lerobot.processor import DataProcessorPipeline, TokenizerProcessorStep
+from lerobot.policies.pi0_fast.modeling_pi0_fast import PI0FastPolicy
+from lerobot.processor import ActionTokenizerProcessorStep, DataProcessorPipeline, TokenizerProcessorStep
 from lerobot.processor.converters import create_transition, identity_transition
 from lerobot.types import TransitionKey
 from lerobot.utils.constants import (
     ACTION,
+    ACTION_TOKEN_MASK,
+    ACTION_TOKENS,
     OBS_IMAGE,
     OBS_LANGUAGE,
     OBS_LANGUAGE_SUBTASK_ATTENTION_MASK,
@@ -86,6 +91,60 @@ class MockTokenizer:
             result = {k: v.squeeze(0) for k, v in result.items()}
 
         return result
+
+
+class MockFastActionTokenizer:
+    """Mock FAST tokenizer returning deterministic action-token IDs."""
+
+    def __call__(self, action: torch.Tensor) -> torch.Tensor:
+        return torch.tensor([7, 8], dtype=torch.long, device=action.device)
+
+
+class MockPaliGemmaTokenizer:
+    """Small tokenizer mock for Pi0Fast action/annotation target streams."""
+
+    bos_token_id = 999
+    vocab_size = 1000
+
+    text_to_ids = {
+        "Action: ": [200, 201],
+        "|": [300],
+        "open drawer\n": [100, 101],
+        "grasp handle\n": [110, 111],
+    }
+    id_to_token = {
+        100: "open",
+        101: "drawer",
+        110: "grasp",
+        111: "handle",
+        200: "Action",
+        201: ":",
+        300: "|",
+        863: "<fast8>",
+        864: "<fast7>",
+        999: "<bos>",
+    }
+    token_to_id = {
+        "open": 100,
+        "drawer": 101,
+        "grasp": 110,
+        "handle": 111,
+        "Action": 200,
+        ":": 201,
+        "|": 300,
+        "<fast8>": 863,
+        "<fast7>": 864,
+        "<bos>": 999,
+    }
+
+    def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
+        return self.text_to_ids[text]
+
+    def convert_ids_to_tokens(self, ids: list[int]) -> list[str]:
+        return [self.id_to_token[idx] for idx in ids]
+
+    def convert_tokens_to_ids(self, tokens: list[str]) -> list[int]:
+        return [self.token_to_id[token] for token in tokens]
 
 
 @pytest.fixture
@@ -159,6 +218,36 @@ def test_basic_tokenization_with_tokenizer_object():
     assert isinstance(attention_mask, torch.Tensor)
     assert tokens.shape == (10,)
     assert attention_mask.shape == (10,)
+
+
+@skip_if_package_missing("transformers")
+def test_task_prompt_ignores_annotation():
+    """Test annotation text is kept out of the language prompt."""
+
+    class TrackingTokenizer(MockTokenizer):
+        def __init__(self):
+            super().__init__(vocab_size=100)
+            self.last_text = None
+
+        def __call__(self, text, **kwargs):
+            self.last_text = text
+            return super().__call__(text, **kwargs)
+
+    tracking_tokenizer = TrackingTokenizer()
+    processor = TokenizerProcessorStep(tokenizer=tracking_tokenizer, max_length=16)
+
+    transition = create_transition(
+        observation={"state": torch.tensor([1.0, 2.0])},
+        action=torch.tensor([0.1, 0.2]),
+        complementary_data={
+            "task": ["Task: pick up cube, State: 1 2 3;\n"],
+            "annotation": ["grasp handle"],
+        },
+    )
+
+    processor(transition)
+
+    assert tracking_tokenizer.last_text == ["Task: pick up cube, State: 1 2 3;\n"]
 
 
 @skip_if_package_missing("transformers")
@@ -364,8 +453,6 @@ def test_get_config_with_tokenizer_name(mock_auto_tokenizer):
         "padding_side": "right",
         "padding": "longest",
         "truncation": False,
-        "instruction_dropout": 0.0,
-        "annotation_dropout": 0.0,
     }
 
     assert config == expected
@@ -393,8 +480,6 @@ def test_get_config_with_tokenizer_object():
         "padding_side": "right",
         "padding": "longest",
         "truncation": False,
-        "instruction_dropout": 0.0,
-        "annotation_dropout": 0.0,
     }
 
     assert config == expected
@@ -666,6 +751,80 @@ def test_features_existing_features():
     assert output_features[PipelineFeatureType.OBSERVATION][
         f"{OBS_LANGUAGE}.attention_mask"
     ].shape == (100,)
+
+
+@skip_if_package_missing("transformers")
+@patch("lerobot.processor.tokenizer_processor.AutoTokenizer")
+def test_action_tokenizer_prepends_annotation_target_tokens(mock_auto_tokenizer):
+    """Test Pi0Fast targets become annotation tokens followed by normal action tokens."""
+    mock_auto_tokenizer.from_pretrained.return_value = MockPaliGemmaTokenizer()
+    processor = ActionTokenizerProcessorStep(
+        action_tokenizer_input_object=MockFastActionTokenizer(),
+        max_action_tokens=12,
+    )
+
+    transition = create_transition(
+        action=torch.zeros(1, 2),
+        complementary_data={"annotation": ["open drawer"]},
+    )
+
+    result = processor(transition)
+    tokens = result[TransitionKey.COMPLEMENTARY_DATA][ACTION_TOKENS]
+    mask = result[TransitionKey.COMPLEMENTARY_DATA][ACTION_TOKEN_MASK]
+
+    expected = torch.tensor([[999, 100, 101, 200, 201, 864, 863, 300, 0, 0, 0, 0]])
+    expected_mask = torch.tensor(
+        [[True, True, True, True, True, True, True, True, False, False, False, False]]
+    )
+    assert torch.equal(tokens, expected)
+    assert torch.equal(mask, expected_mask)
+
+
+@skip_if_package_missing("transformers")
+@patch("lerobot.processor.tokenizer_processor.AutoTokenizer")
+def test_action_tokenizer_keeps_action_only_target_without_annotation(mock_auto_tokenizer):
+    """Test action tokenization is unchanged when no annotation is present."""
+    mock_auto_tokenizer.from_pretrained.return_value = MockPaliGemmaTokenizer()
+    processor = ActionTokenizerProcessorStep(
+        action_tokenizer_input_object=MockFastActionTokenizer(),
+        max_action_tokens=8,
+    )
+
+    transition = create_transition(action=torch.zeros(1, 2), complementary_data={})
+
+    result = processor(transition)
+    tokens = result[TransitionKey.COMPLEMENTARY_DATA][ACTION_TOKENS]
+    mask = result[TransitionKey.COMPLEMENTARY_DATA][ACTION_TOKEN_MASK]
+
+    expected = torch.tensor([[999, 200, 201, 864, 863, 300, 0, 0]])
+    expected_mask = torch.tensor([[True, True, True, True, True, True, False, False]])
+    assert torch.equal(tokens, expected)
+    assert torch.equal(mask, expected_mask)
+
+
+def test_pi0_fast_detokenize_ignores_generated_annotation_prefix():
+    """Test generated annotation text before Action: is ignored for FAST detokenization."""
+    policy = PI0FastPolicy.__new__(PI0FastPolicy)
+    policy.action_tokenizer = object()
+    policy._paligemma_tokenizer = MockPaliGemmaTokenizer()
+    policy.config = SimpleNamespace(fast_skip_tokens=128, validate_action_token_prefix=True)
+
+    captured = {}
+
+    def fake_decode_actions_with_fast(token_ids, time_horizon, action_dim, relaxed_decoding=True):
+        captured["token_ids"] = [token_id.clone() for token_id in token_ids]
+        return np.zeros((len(token_ids), time_horizon, action_dim), dtype=np.float32)
+
+    policy.decode_actions_with_fast = fake_decode_actions_with_fast
+
+    actions = policy.detokenize_actions(
+        torch.tensor([[100, 300, 101, 200, 201, 864, 863, 300]]),
+        action_horizon=1,
+        action_dim=2,
+    )
+
+    assert captured["token_ids"][0].tolist() == [7, 8]
+    assert actions.shape == (1, 1, 2)
 
 
 @skip_if_package_missing("transformers")

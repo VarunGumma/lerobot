@@ -24,7 +24,6 @@ token IDs and attention masks, which are then added to the observation dictionar
 from __future__ import annotations
 
 import logging
-import random
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -82,8 +81,6 @@ class TokenizerProcessorStep(ObservationProcessorStep):
     padding_side: str = "right"
     padding: str = "max_length"
     truncation: bool = True
-    instruction_dropout: float = 0.0
-    annotation_dropout: float = 0.0
 
     # Internal tokenizer instance (not part of the config)
     input_tokenizer: Any = field(default=None, init=False, repr=False)
@@ -118,51 +115,6 @@ class TokenizerProcessorStep(ObservationProcessorStep):
                 "Pass a tokenizer object directly or a tokenizer name to auto-load."
             )
 
-        if not 0.0 <= self.instruction_dropout <= 1.0:
-            raise ValueError(
-                f"instruction_dropout must be in [0, 1], got {self.instruction_dropout}"
-            )
-
-        if not 0.0 <= self.annotation_dropout <= 1.0:
-            raise ValueError(
-                f"annotation_dropout must be in [0, 1], got {self.annotation_dropout}"
-            )
-
-    def _apply_instruction_annotation_dropout(
-        self, task: list[str], annotation: list[str] | None
-    ) -> tuple[list[str], list[str] | None]:
-        """Apply per-sample instruction/annotation erasure before tokenization.
-
-        For each sample, one of three cases is selected uniformly:
-        1) instruction candidate for erasure
-        2) annotation candidate for erasure
-        3) neither
-
-        The selected candidate is then erased (set to "") according to the corresponding
-        dropout probability.
-        """
-        dropped_task = task.copy()
-
-        if annotation is None:
-            if self.instruction_dropout <= 0.0:
-                return dropped_task, None
-            for i in range(len(dropped_task)):
-                if random.random() < self.instruction_dropout:
-                    dropped_task[i] = ""
-            return dropped_task, None
-
-        dropped_annotation = annotation.copy()
-        for i in range(len(dropped_task)):
-            case = random.choice(("instruction", "annotation", "neither"))
-            if case == "instruction":
-                if random.random() < self.instruction_dropout:
-                    dropped_task[i] = ""
-            elif case == "annotation":
-                if random.random() < self.annotation_dropout:
-                    dropped_annotation[i] = ""
-
-        return dropped_task, dropped_annotation
-
     def get_task(self, transition: EnvTransition) -> list[str] | None:
         """
         Extracts the task description(s) from the transition's complementary data.
@@ -188,89 +140,6 @@ class TokenizerProcessorStep(ObservationProcessorStep):
             return list(task)
 
         return None
-    
-    def _add_atomic_step(self, task_state_str: str, atomic_step: str) -> str:
-        """
-        Convert:
-            'Task: <task>, State: <state>;'
-        into:
-            'Task: <task>, Control Plan: <atomic_step>, State: <state>;'
-
-        If task or atomic_step is empty, omit the corresponding prefixed segment.
-        """
-
-        prefix = "Task:"
-        state_marker = ", State:"
-
-        if not task_state_str.startswith(prefix):
-            raise ValueError("Input must start with 'Task:'")
-
-        if state_marker not in task_state_str:
-            raise ValueError("Input must contain ', State:'")
-
-        task_part, state_part = task_state_str.split(state_marker, 1)
-        task_text = task_part[len(prefix):].strip().rstrip(" .")
-        atomic_step = atomic_step.strip().rstrip(" .")
-
-        segments = []
-        
-        if task_text:
-            segments.append(f"Task: {task_text}")
-
-        if atomic_step:
-            segments.append(f"Control Plan: {atomic_step}")
-
-        segments.append(f"State:{state_part}")
-        return ", ".join(segments)
-
-    def get_task_with_annotation(self, transition: EnvTransition) -> list[str] | None:
-        """
-        Extracts the task description(s) from the transition's complementary data.
-
-        Args:
-            transition: The environment transition.
-
-        Returns:
-            A list of task strings, or None if the task key is not found or the value is None.
-        """
-        complementary_data = transition.get(TransitionKey.COMPLEMENTARY_DATA)
-        if complementary_data is None:
-            raise ValueError("Complementary data is None so no task can be extracted from it")
-
-        task = complementary_data[self.task_key]
-        if task is None:
-            raise ValueError("Task extracted from Complementary data is None")
-
-        annotation = complementary_data.get("annotation")
-
-        # Standardize to a list of strings for the tokenizer
-        if isinstance(task, str):
-            task = [task]
-        elif isinstance(task, list) and all(isinstance(t, str) for t in task):
-            task = task.copy()
-        else:
-            return None
-
-        # Keep task-only behavior when no annotation is provided.
-        if annotation is None:
-            return task
-
-        if isinstance(annotation, str):
-            annotation = [annotation]
-        elif not (isinstance(annotation, list) and all(isinstance(a, str) for a in annotation)):
-            return task
-
-        # Strict alignment: one annotation per task/frame.
-        if len(annotation) != len(task):
-            raise ValueError(
-                "Annotation batch size does not match task batch size: "
-                f"{len(annotation)} != {len(task)}"
-            )
-        
-        task, annotation = self._apply_instruction_annotation_dropout(task, annotation)
-        task_with_annotation = [self._add_atomic_step(t, a) for t, a in zip(task, annotation, strict=False)]
-
-        return task_with_annotation
 
     def get_subtask(self, transition: EnvTransition) -> list[str] | None:
         """
@@ -311,13 +180,7 @@ class TokenizerProcessorStep(ObservationProcessorStep):
         Returns:
             The updated observation dictionary including token IDs and an attention mask.
         """
-        complementary_data = self.transition.get(TransitionKey.COMPLEMENTARY_DATA)
-        has_annotations = isinstance(complementary_data, dict) and "annotation" in complementary_data
-        task = (
-            self.get_task_with_annotation(self.transition)
-            if has_annotations
-            else self.get_task(self.transition)
-        )
+        task = self.get_task(self.transition)
 
         if task is None:
             raise ValueError("Task cannot be None")
@@ -423,8 +286,6 @@ class TokenizerProcessorStep(ObservationProcessorStep):
             "padding_side": self.padding_side,
             "padding": self.padding,
             "truncation": self.truncation,
-            "instruction_dropout": self.instruction_dropout,
-            "annotation_dropout": self.annotation_dropout,
         }
 
         # Only save tokenizer_name if it was used to create the tokenizer
@@ -552,11 +413,15 @@ class ActionTokenizerProcessorStep(ActionProcessorStep):
             # During inference, no action is available, skip tokenization
             return new_transition
 
+        complementary_data = new_transition.get(TransitionKey.COMPLEMENTARY_DATA, {})
+        annotation = (
+            complementary_data.get("annotation") if isinstance(complementary_data, dict) else None
+        )
+
         # Tokenize and get both tokens and mask
-        tokens, mask = self._tokenize_action(action)
+        tokens, mask = self._tokenize_action(action, annotation=annotation)
 
         # Store mask in complementary data
-        complementary_data = new_transition.get(TransitionKey.COMPLEMENTARY_DATA, {})
         if complementary_data is None:
             complementary_data = {}
         complementary_data[ACTION_TOKEN_MASK] = mask
@@ -570,12 +435,47 @@ class ActionTokenizerProcessorStep(ActionProcessorStep):
         """
         return self._paligemma_tokenizer.vocab_size - 1 - self.fast_skip_tokens - tokens
 
-    def _tokenize_action(self, action: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _normalize_annotation_batch(self, annotation: Any, batch_size: int) -> list[str] | None:
+        if annotation is None:
+            return None
+
+        if isinstance(annotation, str):
+            annotations = [annotation]
+        elif isinstance(annotation, tuple) and all(isinstance(a, str) for a in annotation):
+            annotations = list(annotation)
+        elif isinstance(annotation, list) and all(isinstance(a, str) for a in annotation):
+            annotations = annotation
+        else:
+            return None
+
+        if len(annotations) != batch_size:
+            raise ValueError(
+                "Annotation batch size does not match action batch size: "
+                f"{len(annotations)} != {batch_size}"
+            )
+
+        return annotations
+
+    def _tokenize_annotation_target(self, annotation: str, device: torch.device) -> torch.Tensor:
+        annotation = annotation.strip()
+        if not annotation:
+            return torch.empty(0, dtype=torch.long, device=device)
+
+        return torch.tensor(
+            self._paligemma_tokenizer.encode(f"{annotation}\n", add_special_tokens=False),
+            dtype=torch.long,
+            device=device,
+        )
+
+    def _tokenize_action(
+        self, action: torch.Tensor, annotation: Any | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Tokenizes the action tensor and creates a mask.
 
         Args:
             action: The input action tensor to tokenize. Shape: (B, H, action_dim) or (H, action_dim,)
+            annotation: Optional per-sample annotation text to prepend to the prediction target.
 
         Returns:
             A tuple of (tokens, mask) where:
@@ -594,6 +494,7 @@ class ActionTokenizerProcessorStep(ActionProcessorStep):
             action = action.unsqueeze(0)
 
         batch_size = action.shape[0]
+        annotations = self._normalize_annotation_batch(annotation, batch_size)
 
         # Tokenize the action batch
         # The fast tokenizer expects action data and returns token IDs
@@ -617,18 +518,39 @@ class ActionTokenizerProcessorStep(ActionProcessorStep):
                 tokens = tokens.flatten()
 
             bos_id = self._paligemma_tokenizer.bos_token_id
-            # add bos
-            tokens = torch.cat(
-                [
-                    torch.tensor([bos_id], device=action.device),
-                    torch.tensor(
-                        self._paligemma_tokenizer.encode("Action: ", add_special_tokens=False),
-                        device=action.device,
-                    ),
-                    self._act_tokens_to_paligemma_tokens(tokens),
-                    torch.tensor(self._paligemma_tokenizer.encode("|"), device=action.device),
-                ]
-            )
+            action_target_parts = [
+                torch.tensor(
+                    self._paligemma_tokenizer.encode("Action: ", add_special_tokens=False),
+                    dtype=torch.long,
+                    device=action.device,
+                ),
+                self._act_tokens_to_paligemma_tokens(tokens),
+                torch.tensor(self._paligemma_tokenizer.encode("|"), dtype=torch.long, device=action.device),
+            ]
+
+            annotation_tokens = None
+            if annotations is not None:
+                annotation_tokens = self._tokenize_annotation_target(annotations[i], action.device)
+                action_target_len = sum(len(part) for part in action_target_parts)
+                annotation_budget = max(self.max_action_tokens - 1 - action_target_len, 0)
+                if len(annotation_tokens) > annotation_budget:
+                    logging.warning(
+                        f"Annotation token length ({len(annotation_tokens)}) exceeds the available target "
+                        f"budget ({annotation_budget}), truncating annotation tokens before action tokens. "
+                        "Consider increasing the `max_action_tokens` in your model config if this happens "
+                        "frequently."
+                    )
+                    annotation_tokens = annotation_tokens[:annotation_budget]
+
+            target_parts = [
+                torch.tensor([bos_id], dtype=torch.long, device=action.device),
+            ]
+            if annotation_tokens is not None:
+                target_parts.append(annotation_tokens)
+
+            target_parts.extend(action_target_parts)
+            # The target stream is BOS + optional annotation text + normal FAST action tokens.
+            tokens = torch.cat(target_parts)
 
             # Truncate or pad to max_action_tokens
             if len(tokens) > self.max_action_tokens:
