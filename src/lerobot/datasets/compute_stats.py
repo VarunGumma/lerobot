@@ -711,9 +711,10 @@ def compute_relative_action_stats(
     relative_mask = np.array(mask_step._build_mask(action_dim), dtype=np.float32)
 
     logging.info("Loading action/state data for relative action stats...")
-    all_actions = np.array(hf_dataset[ACTION], dtype=np.float32)
-    all_states = np.array(hf_dataset[OBS_STATE], dtype=np.float32)
-    episode_indices = np.array(hf_dataset["episode_index"])
+    stats_dataset = hf_dataset.select_columns([ACTION, OBS_STATE, "episode_index"]).with_format(None)
+    all_actions = np.asarray(stats_dataset[ACTION], dtype=np.float32)
+    all_states = np.asarray(stats_dataset[OBS_STATE], dtype=np.float32)
+    episode_indices = np.asarray(stats_dataset["episode_index"])
 
     valid_starts = _get_valid_chunk_starts(episode_indices, chunk_size)
     if len(valid_starts) == 0:
