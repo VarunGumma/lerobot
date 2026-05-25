@@ -37,8 +37,10 @@ from lerobot.utils.constants import (
     ACTION_TOKENS,
     OBS_IMAGE,
     OBS_LANGUAGE,
+    OBS_LANGUAGE_ATTENTION_MASK,
     OBS_LANGUAGE_SUBTASK_ATTENTION_MASK,
     OBS_LANGUAGE_SUBTASK_TOKENS,
+    OBS_LANGUAGE_TOKENS,
     OBS_STATE,
 )
 from tests.utils import skip_if_package_missing
@@ -834,6 +836,53 @@ def test_pi0_fast_detokenize_ignores_generated_annotation_prefix():
 
     assert captured["token_ids"][0].tolist() == [7, 8]
     assert actions.shape == (1, 1, 2)
+
+
+def test_pi0_fast_predict_action_chunk_decodes_full_training_chunk():
+    """Pi0Fast FAST tokens encode chunk_size, then select_action slices n_action_steps."""
+    policy = PI0FastPolicy.__new__(PI0FastPolicy)
+    torch.nn.Module.__init__(policy)
+    policy.config = SimpleNamespace(
+        temperature=0.0,
+        max_decoding_steps=8,
+        use_kv_cache=True,
+        chunk_size=50,
+        n_action_steps=10,
+        output_features={ACTION: SimpleNamespace(shape=(14,))},
+    )
+    policy._preprocess_images = lambda batch: (["images"], ["masks"])
+
+    class FakeFastModel:
+        def sample_actions_fast_kv_cache(
+            self,
+            images,
+            img_masks,
+            tokens,
+            masks,
+            max_decoding_steps,
+            temperature,
+        ):
+            return torch.ones(tokens.shape[0], max_decoding_steps, dtype=torch.long, device=tokens.device)
+
+    object.__setattr__(policy, "model", FakeFastModel())
+    captured = {}
+
+    def fake_detokenize_actions(action_tokens, action_horizon, action_dim):
+        captured["action_horizon"] = action_horizon
+        captured["action_dim"] = action_dim
+        return torch.zeros(action_tokens.shape[0], action_horizon, action_dim)
+
+    policy.detokenize_actions = fake_detokenize_actions
+
+    actions = policy.predict_action_chunk(
+        {
+            OBS_LANGUAGE_TOKENS: torch.zeros(2, 5, dtype=torch.long),
+            OBS_LANGUAGE_ATTENTION_MASK: torch.ones(2, 5, dtype=torch.bool),
+        }
+    )
+
+    assert captured == {"action_horizon": 50, "action_dim": 14}
+    assert actions.shape == (2, 50, 14)
 
 
 @skip_if_package_missing("transformers")

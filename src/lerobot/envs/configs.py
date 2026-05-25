@@ -760,6 +760,12 @@ class RoboTwinEnvConfig(EnvConfig):
     episode_length: int = 300
     obs_type: str = "pixels_agent_pos"
     render_mode: str = "rgb_array"
+    # "qpos" keeps the original joint-space wrapper behavior. "ee" exposes
+    # EEF Euler state to the policy and forwards policy EEF actions through
+    # RoboTwin's native end-effector control mode.
+    action_type: str = "qpos"
+    eef_obs_quat_order: str = "xyzw"
+    eef_action_quat_order: str = "wxyz"
     # Available cameras from RoboTwin's aloha-agilex embodiment: head_camera
     # (torso-mounted) + left_camera / right_camera (wrists).
     camera_names: str = "head_camera,left_camera,right_camera"
@@ -784,6 +790,17 @@ class RoboTwinEnvConfig(EnvConfig):
     )
 
     def __post_init__(self):
+        if self.action_type not in ("qpos", "ee"):
+            raise ValueError(f"Unsupported RoboTwin action_type '{self.action_type}'. Use 'qpos' or 'ee'.")
+        if self.eef_obs_quat_order not in ("xyzw", "wxyz"):
+            raise ValueError(
+                f"Unsupported eef_obs_quat_order '{self.eef_obs_quat_order}'. Use 'xyzw' or 'wxyz'."
+            )
+        if self.eef_action_quat_order not in ("xyzw", "wxyz"):
+            raise ValueError(
+                f"Unsupported eef_action_quat_order '{self.eef_action_quat_order}'. Use 'xyzw' or 'wxyz'."
+            )
+
         cam_list = [c.strip() for c in self.camera_names.split(",") if c.strip()]
         for cam in cam_list:
             self.features[f"pixels/{cam}"] = PolicyFeature(
@@ -826,6 +843,9 @@ class RoboTwinEnvConfig(EnvConfig):
             observation_height=self.observation_height,
             observation_width=self.observation_width,
             episode_length=self.episode_length,
+            action_type=self.action_type,
+            eef_obs_quat_order=self.eef_obs_quat_order,
+            eef_action_quat_order=self.eef_action_quat_order,
         )
 
 

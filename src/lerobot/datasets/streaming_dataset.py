@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 from collections import deque
 from collections.abc import Callable, Generator, Iterable, Iterator
 from pathlib import Path
@@ -327,10 +328,11 @@ class StreamingLeRobotDataset(torch.utils.data.IterableDataset):
         )
 
         if self.load_annotations and "annotations" not in self.meta.episodes.features:
-            raise ValueError(
+            logging.warning(
                 "dataset.load_annotations is enabled but this dataset has no episode annotations metadata. "
-                "Disable it with --dataset.load_annotations=false."
+                "Continuing without per-frame annotations."
             )
+            self.load_annotations = False
 
         self.root = self.meta.root
         self.revision = self.meta.revision

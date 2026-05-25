@@ -56,7 +56,12 @@ def _make_mock_task_env(
     obs_dict = {
         "observation": {cam: {"rgb": np.zeros((height, width, 3), dtype=np.uint8)} for cam in cameras},
         "joint_action": {"vector": np.zeros(ACTION_DIM, dtype=np.float32)},
-        "endpose": {},
+        "endpose": {
+            "left_endpose": np.array([1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+            "left_gripper": np.float32(0.7),
+            "right_endpose": np.array([4.0, 5.0, 6.0, 0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+            "right_gripper": np.float32(0.8),
+        },
     }
 
     mock = MagicMock()
@@ -131,6 +136,18 @@ class TestRoboTwinEnv:
         assert obs["agent_pos"].shape == (ACTION_DIM,)
         assert info["is_success"] is False
 
+    def test_ee_mode_reset_returns_eef_state(self):
+        mock_task = _make_mock_task_env()
+        env = RoboTwinEnv(task_name="beat_block_hammer", action_type="ee", eef_obs_quat_order="xyzw")
+        with _patch_runtime(mock_task):
+            obs, _ = env.reset()
+
+        expected = np.array(
+            [1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 0.7, 4.0, 5.0, 6.0, 0.0, 0.0, 0.0, 0.8],
+            dtype=np.float32,
+        )
+        np.testing.assert_allclose(obs["agent_pos"], expected, atol=1e-6)
+
     def test_reset_calls_setup_demo(self):
         mock_task = _make_mock_task_env()
         env = RoboTwinEnv(task_name="beat_block_hammer")
@@ -156,6 +173,25 @@ class TestRoboTwinEnv:
         assert isinstance(terminated, bool)
         assert isinstance(truncated, bool)
         assert isinstance(info, dict)
+
+    def test_ee_mode_step_uses_robotwin_ee_action_type(self):
+        mock_task = _make_mock_task_env()
+        env = RoboTwinEnv(task_name="beat_block_hammer", action_type="ee", eef_action_quat_order="wxyz")
+        action = np.array(
+            [1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 0.7, 4.0, 5.0, 6.0, 0.0, 0.0, 0.0, 0.8],
+            dtype=np.float32,
+        )
+        with _patch_runtime(mock_task):
+            env.reset()
+            env.step(action)
+
+        sent_action, = mock_task.take_action.call_args.args
+        assert mock_task.take_action.call_args.kwargs["action_type"] == "ee"
+        expected = np.array(
+            [1.0, 2.0, 3.0, 1.0, 0.0, 0.0, 0.0, 0.7, 4.0, 5.0, 6.0, 1.0, 0.0, 0.0, 0.0, 0.8],
+            dtype=np.float32,
+        )
+        np.testing.assert_allclose(sent_action, expected, atol=1e-6)
 
     def test_step_wrong_action_shape_raises(self):
         mock_task = _make_mock_task_env()

@@ -230,10 +230,11 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self.revision = self.meta.revision
 
         if self.load_annotations and "annotations" not in self.meta.episodes.features:
-            raise ValueError(
+            logging.warning(
                 "dataset.load_annotations is enabled but this dataset has no episode annotations metadata. "
-                "Disable it with --dataset.load_annotations=false."
+                "Continuing without per-frame annotations."
             )
+            self.load_annotations = False
 
         if episodes is not None and any(
             episode >= self.meta.total_episodes or episode < 0 for episode in episodes
@@ -746,6 +747,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         obj._return_uint8 = False
         obj._batch_encoding_size = batch_encoding_size
         obj._encoder_threads = encoder_threads
+        obj.load_annotations = True
 
         # Reader is lazily created on first access (write-only mode)
         obj.reader = None
@@ -841,6 +843,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         )
         obj._return_uint8 = False
         obj._batch_encoding_size = batch_encoding_size
+        obj.load_annotations = True
 
         if obj._requested_root is not None:
             obj._requested_root.mkdir(exist_ok=True, parents=True)

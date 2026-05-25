@@ -1461,8 +1461,9 @@ class PI0FastPolicy(PreTrainedPolicy):
                 temperature=temperature,
             )
 
-        # Detokenize action tokens to continuous actions
-        action_horizon = self.config.n_action_steps
+        # FAST tokens encode the full training chunk. Decode with the same horizon
+        # used during action tokenization, then select_action queues n_action_steps.
+        action_horizon = self.config.chunk_size
         action_dim = self.config.output_features[ACTION].shape[0]
 
         continuous_actions = self.detokenize_actions(

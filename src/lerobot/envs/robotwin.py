@@ -20,7 +20,7 @@ import logging
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from functools import partial
-from typing import Any
+from typing import Any, Literal
 
 import gymnasium as gym
 import numpy as np
@@ -42,6 +42,7 @@ ROBOTWIN_CAMERA_NAMES: tuple[str, ...] = (
 )
 
 ACTION_DIM = 14  # 7 DOF × 2 arms
+EE_ACTION_DIM = 16  # 2 × (xyz + quaternion + gripper)
 ACTION_LOW = -1.0
 ACTION_HIGH = 1.0
 DEFAULT_EPISODE_LENGTH = 300
@@ -109,6 +110,50 @@ ROBOTWIN_TASKS: tuple[str, ...] = (
 
 
 _ROBOTWIN_SETUP_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def _as_xyzw(quat: np.ndarray, quat_order: str) -> np.ndarray:
+    """Return a quaternion in scipy's xyzw order."""
+    quat = np.asarray(quat, dtype=np.float32).ravel()
+    if quat.shape[0] != 4:
+        raise ValueError(f"Expected quaternion with 4 values, got shape {quat.shape}")
+    if quat_order == "xyzw":
+        return quat
+    if quat_order == "wxyz":
+        return quat[[1, 2, 3, 0]]
+    raise ValueError(f"Unsupported quaternion order '{quat_order}'. Use 'xyzw' or 'wxyz'.")
+
+
+def _from_xyzw(quat: np.ndarray, quat_order: str) -> np.ndarray:
+    """Return a scipy-ordered xyzw quaternion in the requested order."""
+    quat = np.asarray(quat, dtype=np.float32).ravel()
+    if quat.shape[0] != 4:
+        raise ValueError(f"Expected quaternion with 4 values, got shape {quat.shape}")
+    if quat_order == "xyzw":
+        return quat
+    if quat_order == "wxyz":
+        return quat[[3, 0, 1, 2]]
+    raise ValueError(f"Unsupported quaternion order '{quat_order}'. Use 'xyzw' or 'wxyz'.")
+
+
+def _quat_to_euler_xyz(quat: np.ndarray, quat_order: str) -> np.ndarray:
+    from scipy.spatial.transform import Rotation
+
+    return Rotation.from_quat(_as_xyzw(quat, quat_order)).as_euler("xyz").astype(np.float32)
+
+
+def _euler_xyz_to_quat(euler: np.ndarray, quat_order: str) -> np.ndarray:
+    from scipy.spatial.transform import Rotation
+
+    quat_xyzw = Rotation.from_euler("xyz", np.asarray(euler, dtype=np.float32)).as_quat()
+    return _from_xyzw(quat_xyzw, quat_order).astype(np.float32)
+
+
+def _scalar(value: Any) -> float:
+    arr = np.asarray(value, dtype=np.float32).ravel()
+    if arr.size == 0:
+        return 0.0
+    return float(arr[0])
 
 
 def _load_robotwin_setup_kwargs(task_name: str) -> dict[str, Any]:
@@ -234,8 +279,13 @@ class RoboTwinEnv(gym.Env):
         observation_width: int | None = None,
         episode_length: int = DEFAULT_EPISODE_LENGTH,
         render_mode: str = "rgb_array",
+        action_type: Literal["qpos", "ee"] = "qpos",
+        eef_obs_quat_order: Literal["xyzw", "wxyz"] = "xyzw",
+        eef_action_quat_order: Literal["xyzw", "wxyz"] = "wxyz",
     ):
         super().__init__()
+        if action_type not in ("qpos", "ee"):
+            raise ValueError(f"Unsupported RoboTwin action_type '{action_type}'. Use 'qpos' or 'ee'.")
         self.task_name = task_name
         self.task = task_name  # used by add_envs_task() in utils.py
         self.task_description = task_name.replace("_", " ")
@@ -250,6 +300,9 @@ class RoboTwinEnv(gym.Env):
         self.episode_length = episode_length
         self._max_episode_steps = episode_length  # lerobot_eval.rollout reads this
         self.render_mode = render_mode
+        self.action_type = action_type
+        self.eef_obs_quat_order = eef_obs_quat_order
+        self.eef_action_quat_order = eef_action_quat_order
 
         self._env: Any | None = None  # deferred — created on first reset() inside worker
         self._step_count: int = 0
@@ -270,8 +323,10 @@ class RoboTwinEnv(gym.Env):
                 "agent_pos": spaces.Box(low=-np.inf, high=np.inf, shape=(ACTION_DIM,), dtype=np.float32),
             }
         )
+        action_low = ACTION_LOW if self.action_type == "qpos" else -np.inf
+        action_high = ACTION_HIGH if self.action_type == "qpos" else np.inf
         self.action_space = spaces.Box(
-            low=ACTION_LOW, high=ACTION_HIGH, shape=(ACTION_DIM,), dtype=np.float32
+            low=action_low, high=action_high, shape=(ACTION_DIM,), dtype=np.float32
         )
 
     def _ensure_env(self) -> None:
@@ -285,6 +340,47 @@ class RoboTwinEnv(gym.Env):
             return
         task_cls = _load_robotwin_task(self.task_name)
         self._env = task_cls()
+
+    def _get_eef_state(self, raw: dict[str, Any]) -> np.ndarray:
+        endpose = raw.get("endpose") or {}
+        try:
+            left_pose = np.asarray(endpose["left_endpose"], dtype=np.float32).ravel()
+            right_pose = np.asarray(endpose["right_endpose"], dtype=np.float32).ravel()
+        except KeyError as exc:
+            raise KeyError(
+                "RoboTwin action_type='ee' requires get_obs()['endpose'] with "
+                "'left_endpose', 'left_gripper', 'right_endpose', and 'right_gripper'."
+            ) from exc
+
+        if left_pose.size < 7 or right_pose.size < 7:
+            raise ValueError(
+                "RoboTwin endpose entries must contain xyz + quaternion "
+                f"(got left={left_pose.shape}, right={right_pose.shape})."
+            )
+
+        left = np.concatenate(
+            [
+                left_pose[:3],
+                _quat_to_euler_xyz(left_pose[3:7], self.eef_obs_quat_order),
+                np.array([_scalar(endpose.get("left_gripper", 0.0))], dtype=np.float32),
+            ]
+        )
+        right = np.concatenate(
+            [
+                right_pose[:3],
+                _quat_to_euler_xyz(right_pose[3:7], self.eef_obs_quat_order),
+                np.array([_scalar(endpose.get("right_gripper", 0.0))], dtype=np.float32),
+            ]
+        )
+        return np.concatenate([left, right]).astype(np.float32)
+
+    def _get_joint_state(self, raw: dict[str, Any]) -> np.ndarray:
+        ja = raw.get("joint_action") or {}
+        vec = ja.get("vector")
+        if vec is not None:
+            arr = np.asarray(vec, dtype=np.float32).ravel()
+            return arr[:ACTION_DIM] if arr.size >= ACTION_DIM else np.zeros(ACTION_DIM, dtype=np.float32)
+        return np.zeros(ACTION_DIM, dtype=np.float32)
 
     def _get_obs(self) -> RobotObservation:
         assert self._env is not None, "_get_obs called before _ensure_env()"
@@ -305,17 +401,29 @@ class RoboTwinEnv(gym.Env):
                 img = img[..., :3]
             images[cam] = img
 
-        ja = raw.get("joint_action") or {}
-        vec = ja.get("vector")
-        if vec is not None:
-            arr = np.asarray(vec, dtype=np.float32).ravel()
-            joint_state = (
-                arr[:ACTION_DIM] if arr.size >= ACTION_DIM else np.zeros(ACTION_DIM, dtype=np.float32)
-            )
-        else:
-            joint_state = np.zeros(ACTION_DIM, dtype=np.float32)
+        agent_pos = self._get_eef_state(raw) if self.action_type == "ee" else self._get_joint_state(raw)
 
-        return {"pixels": images, "agent_pos": joint_state}
+        return {"pixels": images, "agent_pos": agent_pos}
+
+    def _eef_policy_action_to_robotwin_action(self, action: np.ndarray) -> np.ndarray:
+        action = np.asarray(action, dtype=np.float32).ravel()
+        if action.shape[0] != ACTION_DIM:
+            raise ValueError(f"Expected EEF policy action of shape ({ACTION_DIM},), got {action.shape}")
+
+        left = action[:7]
+        right = action[7:]
+        left_quat = _euler_xyz_to_quat(left[3:6], self.eef_action_quat_order)
+        right_quat = _euler_xyz_to_quat(right[3:6], self.eef_action_quat_order)
+        return np.concatenate(
+            [
+                left[:3],
+                left_quat,
+                left[6:7],
+                right[:3],
+                right_quat,
+                right[6:7],
+            ]
+        ).astype(np.float32)
 
     def reset(self, seed: int | None = None, **kwargs) -> tuple[RobotObservation, dict]:
         self._ensure_env()
@@ -340,7 +448,14 @@ class RoboTwinEnv(gym.Env):
 
         with torch.enable_grad():
             if hasattr(self._env, "take_action"):
-                self._env.take_action(action)
+                if self.action_type == "ee":
+                    robotwin_action = self._eef_policy_action_to_robotwin_action(action)
+                    self._env.take_action(robotwin_action, action_type="ee")
+                else:
+                    try:
+                        self._env.take_action(action, action_type="qpos")
+                    except TypeError:
+                        self._env.take_action(action)
             else:
                 self._env.step(action)
 
@@ -398,6 +513,9 @@ def _make_env_fns(
     observation_height: int,
     observation_width: int,
     episode_length: int,
+    action_type: Literal["qpos", "ee"],
+    eef_obs_quat_order: Literal["xyzw", "wxyz"],
+    eef_action_quat_order: Literal["xyzw", "wxyz"],
 ) -> list[Callable[[], RoboTwinEnv]]:
     """Return n_envs factory callables for a single task."""
 
@@ -410,6 +528,9 @@ def _make_env_fns(
             observation_height=observation_height,
             observation_width=observation_width,
             episode_length=episode_length,
+            action_type=action_type,
+            eef_obs_quat_order=eef_obs_quat_order,
+            eef_action_quat_order=eef_action_quat_order,
         )
 
     return [partial(_make_one, i) for i in range(n_envs)]
@@ -423,6 +544,9 @@ def create_robotwin_envs(
     observation_height: int = DEFAULT_CAMERA_H,
     observation_width: int = DEFAULT_CAMERA_W,
     episode_length: int = DEFAULT_EPISODE_LENGTH,
+    action_type: Literal["qpos", "ee"] = "qpos",
+    eef_obs_quat_order: Literal["xyzw", "wxyz"] = "xyzw",
+    eef_action_quat_order: Literal["xyzw", "wxyz"] = "wxyz",
 ) -> dict[str, dict[int, Any]]:
     """Create vectorized RoboTwin 2.0 environments.
 
@@ -473,6 +597,9 @@ def create_robotwin_envs(
             observation_height=observation_height,
             observation_width=observation_width,
             episode_length=episode_length,
+            action_type=action_type,
+            eef_obs_quat_order=eef_obs_quat_order,
+            eef_action_quat_order=eef_action_quat_order,
         )
         if is_async:
             lazy = _LazyAsyncVectorEnv(fns, cached_obs_space, cached_act_space, cached_metadata)
