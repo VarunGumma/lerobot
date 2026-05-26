@@ -323,6 +323,14 @@ class PI0FastPytorch(nn.Module):  # see openpi `PI0Pytorch`
         self.config = config
         self.rtc_processor = rtc_processor
         self._paligemma_tokenizer = paligemma_tokenizer
+        self._action_prefix_token_ids = (
+            paligemma_tokenizer.encode("Action: ", add_special_tokens=False)
+            if paligemma_tokenizer is not None
+            else []
+        )
+        self._action_end_token_ids = (
+            paligemma_tokenizer.encode("|") if paligemma_tokenizer is not None else []
+        )
 
         paligemma_config = get_gemma_config(config.paligemma_variant)
 
@@ -598,7 +606,9 @@ class PI0FastPytorch(nn.Module):  # see openpi `PI0Pytorch`
         lm_head = self.paligemma_with_expert.paligemma.lm_head
 
         # Targets are the FAST action tokens
-        fast_targets = fast_action_tokens  # (B, num_fast_embs)
+        full_fast_action_tokens = fast_action_tokens
+        full_fast_action_masks = fast_action_masks
+        fast_targets = full_fast_action_tokens  # (B, num_fast_embs)
 
         # extract logits for FAST token prediction
         fast_hidden = prefix_out[:, -fast_targets.shape[1] :, :]
@@ -610,7 +620,7 @@ class PI0FastPytorch(nn.Module):  # see openpi `PI0Pytorch`
         # logits[:, i] predicts targets[:, i+1]
         fast_logits_for_pred = fast_logits_for_pred[:, :-1, :]  # shift logits left
         fast_targets = fast_targets[:, 1:]  # shift targets right
-        fast_action_masks = fast_action_masks[:, 1:]  # shift masks to match targets
+        fast_action_masks = full_fast_action_masks[:, 1:]  # shift masks to match targets
 
         # compute cross-entropy loss
         loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
@@ -626,10 +636,90 @@ class PI0FastPytorch(nn.Module):  # see openpi `PI0Pytorch`
         masked_fast_loss = fast_loss_per_token * fast_action_masks.float()
         fast_loss = masked_fast_loss.sum() / fast_action_masks.sum().clamp(min=1)
 
-        return {
+        loss_dict = {
             "ce_loss": fast_loss,
             "loss": fast_loss,
         }
+        with torch.no_grad():
+            loss_dict.update(
+                self._compute_target_loss_splits(
+                    fast_loss_per_token.detach(),
+                    fast_action_masks.detach(),
+                    full_fast_action_tokens.detach(),
+                    full_fast_action_masks.detach(),
+                )
+            )
+        return loss_dict
+
+    @staticmethod
+    def _find_token_id_subsequence(
+        token_ids: list[int], subsequence: list[int], start: int = 0
+    ) -> int | None:
+        if not subsequence:
+            return None
+
+        start = max(start, 0)
+        for i in range(start, len(token_ids) - len(subsequence) + 1):
+            if token_ids[i : i + len(subsequence)] == subsequence:
+                return i
+        return None
+
+    def _compute_target_loss_splits(
+        self,
+        loss_per_token: Tensor,
+        target_mask: Tensor,
+        full_tokens: Tensor,
+        full_mask: Tensor,
+    ) -> dict[str, Tensor]:
+        """Compute logging-only losses for annotation text and FAST action tokens."""
+        if not self._action_prefix_token_ids:
+            return {}
+
+        target_mask = target_mask.bool()
+        annotation_mask = torch.zeros_like(target_mask, dtype=torch.bool)
+        action_token_mask = torch.zeros_like(target_mask, dtype=torch.bool)
+        target_positions = torch.arange(1, full_tokens.shape[1], device=full_tokens.device)
+
+        for batch_idx in range(full_tokens.shape[0]):
+            valid_len = int(full_mask[batch_idx].sum().item())
+            token_ids = full_tokens[batch_idx, :valid_len].detach().cpu().tolist()
+            action_prefix_start = self._find_token_id_subsequence(
+                token_ids, self._action_prefix_token_ids
+            )
+            if action_prefix_start is None:
+                continue
+
+            action_start = action_prefix_start + len(self._action_prefix_token_ids)
+            action_end = valid_len
+            if self._action_end_token_ids:
+                action_end_marker = self._find_token_id_subsequence(
+                    token_ids, self._action_end_token_ids, start=action_start
+                )
+                if action_end_marker is not None:
+                    action_end = action_end_marker
+
+            sample_target_mask = target_mask[batch_idx]
+            annotation_mask[batch_idx] = sample_target_mask & (
+                target_positions < action_prefix_start
+            )
+            action_token_mask[batch_idx] = sample_target_mask & (
+                (target_positions >= action_start) & (target_positions < action_end)
+            )
+
+        split_losses: dict[str, Tensor] = {}
+        annotation_count = annotation_mask.sum()
+        if annotation_count.item() > 0:
+            split_losses["annotation_loss"] = (
+                loss_per_token * annotation_mask.float()
+            ).sum() / annotation_count
+
+        action_token_count = action_token_mask.sum()
+        if action_token_count.item() > 0:
+            split_losses["action_token_loss"] = (
+                loss_per_token * action_token_mask.float()
+            ).sum() / action_token_count
+
+        return split_losses
 
     @torch.no_grad()
     def sample_actions_fast(
@@ -1505,4 +1595,7 @@ class PI0FastPolicy(PreTrainedPolicy):
             "loss": loss.item(),
             "ce_loss": loss_dict["ce_loss"].item(),
         }
+        for key in ("annotation_loss", "action_token_loss"):
+            if key in loss_dict:
+                detailed_loss_dict[key] = loss_dict[key].item()
         return loss, detailed_loss_dict

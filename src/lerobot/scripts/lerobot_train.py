@@ -157,6 +157,23 @@ def update_policy(
     train_metrics.grad_norm = grad_norm.item()
     train_metrics.lr = optimizer.param_groups[0]["lr"]
     train_metrics.update_s = time.perf_counter() - start_time
+
+    if output_dict:
+        diagnostic_meters = {
+            "annotation_loss": ("ann_loss", ":.3f"),
+            "action_token_loss": ("act_tok_loss", ":.3f"),
+        }
+        for key, (meter_name, meter_fmt) in diagnostic_meters.items():
+            if key not in output_dict:
+                continue
+            if key not in train_metrics.metrics:
+                train_metrics.metrics[key] = AverageMeter(meter_name, meter_fmt)
+
+            value = output_dict[key]
+            if isinstance(value, torch.Tensor):
+                value = value.item()
+            train_metrics.metrics[key].update(float(value))
+
     return train_metrics, output_dict
 
 
