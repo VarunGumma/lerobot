@@ -10,6 +10,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
 from huggingface_hub.constants import CONFIG_NAME, SAFETENSORS_SINGLE_FILE
 from pydantic import BaseModel
+from scipy.spatial.transform import Rotation
 
 from lerobot.configs import PreTrainedConfig
 from lerobot.policies.factory import get_policy_class, make_pre_post_processors
@@ -22,6 +23,8 @@ from lerobot.utils.constants import (
 )
 
 DEFAULT_ROBOTWIN_CAMERA_ORDER = ("cam_high", "cam_right_wrist", "cam_left_wrist")
+INTERNAL_EEF_DIM = 14
+ROBOTWIN_EEF_DIM = 16
 ROBOTWIN_CAMERA_ALIASES = {
     "head_camera": "cam_high",
     "right_camera": "cam_right_wrist",
@@ -36,6 +39,8 @@ class InitRequest(BaseModel):
     actions_per_chunk: int | None = None
     device: str | None = None
     camera_order: list[str] | None = None
+    eef_input_quat_order: str = "xyzw"
+    eef_output_quat_order: str = "xyzw"
 
 
 class LanguageRequest(BaseModel):
@@ -48,6 +53,70 @@ def _camera_name_alias(name: str) -> str:
 
 def _feature_suffix(feature_key: str) -> str:
     return feature_key.rsplit(".", maxsplit=1)[-1]
+
+
+def _as_xyzw(quat: np.ndarray, quat_order: str) -> np.ndarray:
+    quat = np.asarray(quat, dtype=np.float32).ravel()
+    if quat.shape[0] != 4:
+        raise ValueError(f"Expected quaternion with 4 values, got shape {quat.shape}.")
+    if quat_order == "xyzw":
+        return quat
+    if quat_order == "wxyz":
+        return quat[[1, 2, 3, 0]]
+    raise ValueError(f"Unsupported quaternion order '{quat_order}'. Use 'xyzw' or 'wxyz'.")
+
+
+def _from_xyzw(quat: np.ndarray, quat_order: str) -> np.ndarray:
+    quat = np.asarray(quat, dtype=np.float32).ravel()
+    if quat.shape[0] != 4:
+        raise ValueError(f"Expected quaternion with 4 values, got shape {quat.shape}.")
+    if quat_order == "xyzw":
+        return quat
+    if quat_order == "wxyz":
+        return quat[[3, 0, 1, 2]]
+    raise ValueError(f"Unsupported quaternion order '{quat_order}'. Use 'xyzw' or 'wxyz'.")
+
+
+def robotwin_eef16_to_policy_eef14(state: np.ndarray, quat_order: str) -> np.ndarray:
+    state = np.asarray(state, dtype=np.float32).ravel()
+    if state.shape[0] != ROBOTWIN_EEF_DIM:
+        raise ValueError(f"Expected 16D EEF state, got shape {state.shape}.")
+
+    left = state[:8]
+    right = state[8:]
+    left_euler = Rotation.from_quat(_as_xyzw(left[3:7], quat_order)).as_euler("xyz").astype(np.float32)
+    right_euler = Rotation.from_quat(_as_xyzw(right[3:7], quat_order)).as_euler("xyz").astype(np.float32)
+    return np.concatenate(
+        [
+            left[:3],
+            left_euler,
+            left[7:8],
+            right[:3],
+            right_euler,
+            right[7:8],
+        ]
+    ).astype(np.float32)
+
+
+def policy_eef14_to_robotwin_eef16(action: np.ndarray, quat_order: str) -> np.ndarray:
+    action = np.asarray(action, dtype=np.float32).ravel()
+    if action.shape[0] != INTERNAL_EEF_DIM:
+        raise ValueError(f"Expected 14D EEF action, got shape {action.shape}.")
+
+    left = action[:7]
+    right = action[7:]
+    left_quat = _from_xyzw(Rotation.from_euler("xyz", left[3:6]).as_quat(), quat_order)
+    right_quat = _from_xyzw(Rotation.from_euler("xyz", right[3:6]).as_quat(), quat_order)
+    return np.concatenate(
+        [
+            left[:3],
+            left_quat,
+            left[6:7],
+            right[:3],
+            right_quat,
+            right[6:7],
+        ]
+    ).astype(np.float32)
 
 
 def _is_pretrained_model_dir(path: Path) -> bool:
@@ -128,6 +197,8 @@ class LeRobotPolicyHost:
         actions_per_chunk: int | None = None,
         device: str | None = None,
         camera_order: list[str] | None = None,
+        eef_input_quat_order: str = "xyzw",
+        eef_output_quat_order: str = "xyzw",
     ) -> None:
         self.requested_model_path = model_path
         self.model_path = resolve_pretrained_model_path(model_path)
@@ -156,14 +227,21 @@ class LeRobotPolicyHost:
             raise ValueError("Loaded policy has no image features; this server expects visual Pi0-family policies.")
 
         self.camera_order = tuple(camera_order or DEFAULT_ROBOTWIN_CAMERA_ORDER)
+        self.eef_input_quat_order = eef_input_quat_order
+        self.eef_output_quat_order = eef_output_quat_order
         self.actions_per_chunk = actions_per_chunk
         self.instruction: str | None = None
         self._raw_obs: dict[str, Any] | None = None
+        self._return_robotwin_eef_actions = False
         self.policy.reset()
 
         print(f"[LeRobotPolicyHost] Policy type: {self.config.type}")
         print(f"[LeRobotPolicyHost] Image features: {self.image_keys}")
         print(f"[LeRobotPolicyHost] Incoming camera order: {self.camera_order}")
+        print(
+            "[LeRobotPolicyHost] 16D EEF quaternion orders: "
+            f"input={self.eef_input_quat_order}, output={self.eef_output_quat_order}"
+        )
 
     def set_language(self, instruction: str) -> None:
         self.instruction = instruction
@@ -182,6 +260,23 @@ class LeRobotPolicyHost:
             f"Could not map incoming camera '{camera_name}' to model image keys {self.image_keys}"
         )
 
+    def _state_for_policy(self, state: np.ndarray) -> np.ndarray:
+        state_np = np.asarray(state, dtype=np.float32).ravel()
+        expected_state_dim = self.policy.config.robot_state_feature.shape[0]
+        self._return_robotwin_eef_actions = False
+
+        if state_np.shape[0] == expected_state_dim:
+            return state_np
+
+        if expected_state_dim == INTERNAL_EEF_DIM and state_np.shape[0] == ROBOTWIN_EEF_DIM:
+            self._return_robotwin_eef_actions = True
+            return robotwin_eef16_to_policy_eef14(state_np, self.eef_input_quat_order)
+
+        raise ValueError(
+            f"Expected state dim {expected_state_dim} for {self.config.type}, or 16D EEF "
+            f"for a 14D EEF checkpoint, got {state_np.shape[0]}."
+        )
+
     def update_observation_window(self, img_arr: list[np.ndarray], state: np.ndarray) -> None:
         if self.instruction is None:
             raise RuntimeError("Call set_language() before update_observation_window().")
@@ -196,12 +291,7 @@ class LeRobotPolicyHost:
             key = self._model_key_for_camera(camera_name, index)
             frame[key] = _image_to_chw_float01(image)
 
-        state_np = np.asarray(state, dtype=np.float32).ravel()
-        expected_state_dim = self.policy.config.robot_state_feature.shape[0]
-        if state_np.shape[0] != expected_state_dim:
-            raise ValueError(
-                f"Expected state dim {expected_state_dim} for {self.config.type}, got {state_np.shape[0]}."
-            )
+        state_np = self._state_for_policy(state)
 
         frame[OBS_STATE] = torch.from_numpy(state_np)
         frame["task"] = self.instruction
@@ -241,6 +331,11 @@ class LeRobotPolicyHost:
             raise RuntimeError(
                 f"Expected postprocessed action dim {expected_action_dim}, got {actions.shape[-1]}."
             )
+        if self._return_robotwin_eef_actions:
+            actions = np.stack(
+                [policy_eef14_to_robotwin_eef16(action, self.eef_output_quat_order) for action in actions],
+                axis=0,
+            )
         return actions
 
     def reset_observation_windows(self) -> None:
@@ -279,6 +374,8 @@ async def init_model(payload: InitRequest):
             actions_per_chunk=action_count,
             device=payload.device,
             camera_order=payload.camera_order,
+            eef_input_quat_order=payload.eef_input_quat_order,
+            eef_output_quat_order=payload.eef_output_quat_order,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -290,6 +387,8 @@ async def init_model(payload: InitRequest):
         "model_path": model.model_path,
         "requested_model_path": model.requested_model_path,
         "actions_per_chunk": model.actions_per_chunk,
+        "eef_input_quat_order": model.eef_input_quat_order,
+        "eef_output_quat_order": model.eef_output_quat_order,
     }
 
 

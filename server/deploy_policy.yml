@@ -26,7 +26,10 @@ device: "cuda"
 # URL of the lerobot server hosting the PI0 policy
 server_url: "http://127.0.0.1:8000"
 
-# Use "ee" for checkpoints trained on 14D EEF xyz+rpy+gripper state/action.
+# Use "ee" to send/receive RoboTwin 16D EEF xyz+quat+gripper vectors.
+# The server converts 16D xyz+quat+gripper to the checkpoint's internal
+# 14D xyz+rpy+gripper representation before policy inference, then converts
+# the returned action chunk back to 16D for RoboTwin.
 # Use "qpos" for checkpoints trained on RoboTwin joint vectors.
 action_type: "ee"
 
