@@ -1,0 +1,42 @@
+# Basic experiment configuration (keep unchanged)
+policy_name: null
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null
+instruction_type: unseen
+
+# LeRobot Pi0-family server parameters.
+# Path to the model to serve. This can be any of:
+# - a pretrained_model directory containing config.json and model.safetensors
+# - a training checkpoint directory such as .../checkpoints/005000
+# - .../checkpoints/last
+# - the run output directory containing checkpoints/last/pretrained_model
+model_path: /mnt/data/varun/RoboTwin2.0-Full/huggingface/outputs/finetune_baseline_20260321_092847/checkpoints/009000/pretrained_model
+
+# Optional alias if you prefer naming the training checkpoint explicitly.
+# checkpoint_path: /mnt/data/varun/RoboTwin2.0-Full/huggingface/outputs/run_name/checkpoints/last
+
+# Number of action steps to request per inference call.
+pi0_step: 50
+
+# Torch device to load the model on. Set to "cpu" if no GPU is available.
+device: "cuda"
+
+# URL of the lerobot server hosting the PI0 policy
+server_url: "http://127.0.0.1:8000"
+
+# Use "ee" for checkpoints trained on 14D EEF xyz+rpy+gripper state/action.
+# Use "qpos" for checkpoints trained on RoboTwin joint vectors.
+action_type: "ee"
+
+# RoboTwin endpose quaternion order.
+eef_obs_quat_order: "xyzw"
+eef_action_quat_order: "xyzw"
+
+# deploy_policy.py sends images in head, right wrist, left wrist order.
+# The server maps these names onto the policy checkpoint image feature keys.
+camera_order:
+  - cam_high
+  - cam_right_wrist
+  - cam_left_wrist
